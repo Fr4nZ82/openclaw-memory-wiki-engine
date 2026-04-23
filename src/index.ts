@@ -210,7 +210,9 @@ function register(api: any): void {
   // -------------------------------------------------------------------
 
   if (api.registerTool) {
-    api.registerTool("memory_search", {
+    api.registerTool({
+      name: "memory_search",
+      label: "Memory Search",
       description:
         "Search the memory. Hybrid search (semantic + keyword) " +
         "on facts, wiki and session captures. Use this tool when you " +
@@ -226,19 +228,20 @@ function register(api: any): void {
         },
         required: ["query"],
       },
-      async execute(params: { query: string }, context: any) {
-        if (!db || !config) return "Memory not initialized";
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        if (!db || !config) return { content: [{ type: "text", text: "Memory not initialized" }] };
 
-        const senderId = extractSenderId(context?.sessionKey);
+        const query = params.query as string;
+        const senderId = extractSenderId(undefined);
         const recallCtx = await buildRecallContext(
           db,
           config,
-          context?.sessionKey || "unknown",
-          params.query,
+          "unknown",
+          query,
           senderId
         );
 
-        return recallCtx.systemContext || "No results found.";
+        return { content: [{ type: "text", text: recallCtx.systemContext || "No results found." }] };
       },
     });
 
@@ -246,7 +249,9 @@ function register(api: any): void {
     // Tool: remember
     // -------------------------------------------------------------------
 
-    api.registerTool("remember", {
+    api.registerTool({
+      name: "remember",
+      label: "Remember",
       description:
         "Explicitly save a fact to memory. Use when a user says " +
         "'remember that...' or when you want to save something " +
@@ -262,18 +267,16 @@ function register(api: any): void {
             type: "string",
             enum: ["fact", "preference", "rule", "episode"],
             description: "Fact type",
-            default: "fact",
           },
         },
         required: ["fact"],
       },
-      async execute(
-        params: { fact: string; fact_type?: string },
-        context: any
-      ) {
-        if (!db || !config) return "Memory not initialized";
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        if (!db || !config) return { content: [{ type: "text", text: "Memory not initialized" }] };
 
-        const senderId = extractSenderId(context?.sessionKey);
+        const fact = params.fact as string;
+        const factType = (params.fact_type as string) || "fact";
+        const senderId = "manual";
 
         // Insert directly as capture (will be promoted by the dream)
         db.prepare(
@@ -282,16 +285,16 @@ function register(api: any): void {
              owner_type, owner_id, fact_type, is_internal, captured_at)
            VALUES (?, ?, ?, ?, ?, 'user', ?, ?, 0, datetime('now'))`
         ).run(
-          context?.sessionKey || "manual",
-          `remember: ${params.fact}`,
-          params.fact,
+          "manual",
+          `remember: ${fact}`,
+          fact,
           topicsToJson(["manual"]),
           senderId,
           senderId,
-          params.fact_type || "fact"
+          factType
         );
 
-        return `✅ Will remember: "${params.fact}"`;
+        return { content: [{ type: "text", text: `✅ Will remember: "${fact}"` }] };
       },
     });
 
@@ -299,7 +302,9 @@ function register(api: any): void {
     // Tool: archive_search
     // -------------------------------------------------------------------
 
-    api.registerTool("archive_search", {
+    api.registerTool({
+      name: "archive_search",
+      label: "Archive Search",
       description:
         "Search raw transcripts of past conversations. " +
         "Last-resort fallback when memory and wiki have no results. " +
@@ -314,26 +319,29 @@ function register(api: any): void {
           limit: {
             type: "number",
             description: "Maximum number of results (default: 10)",
-            default: 10,
           },
         },
         required: ["query"],
       },
-      execute(params: { query: string; limit?: number }) {
-        if (!db) return "Memory not initialized";
+      execute(_toolCallId: string, params: Record<string, unknown>) {
+        if (!db) return { content: [{ type: "text", text: "Memory not initialized" }] };
 
-        const results = searchArchive(db, params.query, params.limit ?? 10);
+        const query = params.query as string;
+        const limit = (params.limit as number) ?? 10;
+        const results = searchArchive(db, query, limit);
 
         if (results.length === 0) {
-          return "No results found in the archive.";
+          return { content: [{ type: "text", text: "No results found in the archive." }] };
         }
 
-        return results
+        const text = results
           .map(
             (r) =>
               `[${r.timestamp}] ${r.sender_name || "?"}(${r.role}): ${r.message_text}`
           )
           .join("\n");
+
+        return { content: [{ type: "text", text }] };
       },
     });
 
@@ -341,7 +349,9 @@ function register(api: any): void {
     // Tool: wiki_status
     // -------------------------------------------------------------------
 
-    api.registerTool("wiki_status", {
+    api.registerTool({
+      name: "wiki_status",
+      label: "Wiki Status",
       description:
         "Shows auto-generated wiki status: page count, " +
         "entities, groups, concepts, topics, last update.",
@@ -350,11 +360,11 @@ function register(api: any): void {
         properties: {},
       },
       execute() {
-        if (!config) return "Plugin not initialized";
+        if (!config) return { content: [{ type: "text", text: "Plugin not initialized" }] };
 
         const status = getWikiStatus(config);
 
-        return [
+        const text = [
           "📖 Wiki Status",
           `- Total pages: ${status.totalPages}`,
           `  - Entities: ${status.entitiesCount}`,
@@ -364,6 +374,8 @@ function register(api: any): void {
           `- Last updated: ${status.lastUpdated || "never"}`,
           `- Disk size: ${(status.diskSizeBytes / 1024).toFixed(1)} KB`,
         ].join("\n");
+
+        return { content: [{ type: "text", text }] };
       },
     });
   }
