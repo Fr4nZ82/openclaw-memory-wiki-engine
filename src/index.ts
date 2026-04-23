@@ -386,41 +386,49 @@ function register(api: any): void {
 
   if (api.registerCommand) {
     // /dream — manual trigger
-    api.registerCommand("dream", {
-      description: "Runs a memory consolidation cycle",
-      async execute(_args: string, _context: any) {
-        if (!db || !config) return "Plugin not initialized";
+    api.registerCommand({
+      name: "dream",
+      description: "Runs a memory consolidation cycle (pass 'rem' for deep)",
+      acceptsArgs: true,
+      requireAuth: false,
+      handler: async (ctx: { args?: string }) => {
+        if (!db || !config) return { text: "Plugin not initialized" };
 
-        const type = _args?.trim() === "rem" ? "rem" : "light";
+        const type = ctx.args?.trim() === "rem" ? "rem" : "light";
         const report =
           type === "rem"
             ? await dreamRem(db, config, log)
             : await dreamLight(db, config, log);
 
-        return [
-          `🌙 Dream ${report.type} complete`,
-          `- Captures processed: ${report.capturesProcessed}`,
-          `- Facts created: ${report.factsCreated}`,
-          `- Superseded: ${report.factsSuperseded}`,
-          report.type === "rem"
-            ? `- De-duplicated: ${report.factsDeduplicated}\n` +
-              `- Decayed: ${report.factsDecayed}\n` +
-              `- Wiki pages updated: ${report.wikiPagesUpdated}`
-            : "",
-          report.errors.length > 0
-            ? `⚠️ Errors: ${report.errors.length}`
-            : "",
-        ]
-          .filter(Boolean)
-          .join("\n");
+        return {
+          text: [
+            `🌙 Dream ${report.type} complete`,
+            `- Captures processed: ${report.capturesProcessed}`,
+            `- Facts created: ${report.factsCreated}`,
+            `- Superseded: ${report.factsSuperseded}`,
+            report.type === "rem"
+              ? `- De-duplicated: ${report.factsDeduplicated}\n` +
+                `- Decayed: ${report.factsDecayed}\n` +
+                `- Wiki pages updated: ${report.wikiPagesUpdated}`
+              : "",
+            report.errors.length > 0
+              ? `⚠️ Errors: ${report.errors.length}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        };
       },
     });
 
     // /memory-status — statistics
-    api.registerCommand("memory-status", {
+    api.registerCommand({
+      name: "memory-status",
       description: "Shows memory statistics",
-      execute() {
-        if (!db) return "Plugin not initialized";
+      acceptsArgs: false,
+      requireAuth: false,
+      handler: () => {
+        if (!db) return { text: "Plugin not initialized" };
 
         const facts = db
           .prepare("SELECT COUNT(*) as c FROM facts WHERE is_active = 1")
@@ -437,24 +445,29 @@ function register(api: any): void {
           .prepare("SELECT COUNT(*) as c FROM facts WHERE is_active = 0")
           .get() as { c: number };
 
-        return [
-          "📊 Memory Wiki Engine Status",
-          `- Active facts: ${facts.c}`,
-          `- Superseded facts: ${superseded.c}`,
-          `- Pending captures: ${captures.c}`,
-          `- Archived messages: ${archive.c}`,
-        ].join("\n");
+        return {
+          text: [
+            "📊 Memory Wiki Engine Status",
+            `- Active facts: ${facts.c}`,
+            `- Superseded facts: ${superseded.c}`,
+            `- Pending captures: ${captures.c}`,
+            `- Archived messages: ${archive.c}`,
+          ].join("\n"),
+        };
       },
     });
 
     // /focus <topic> — force session topic
-    api.registerCommand("focus", {
+    api.registerCommand({
+      name: "focus",
       description: "Forces a topic for the current session",
-      execute(args: string, context: any) {
-        if (!db) return "Plugin not initialized";
+      acceptsArgs: true,
+      requireAuth: false,
+      handler: (ctx: { args?: string; sessionKey?: string }) => {
+        if (!db) return { text: "Plugin not initialized" };
 
-        const topic = args?.trim();
-        if (!topic) return "Usage: /focus <topic>";
+        const topic = ctx.args?.trim();
+        if (!topic) return { text: "Usage: /focus <topic>" };
 
         // Insert a dummy capture with the forced topic
         db.prepare(
@@ -462,42 +475,50 @@ function register(api: any): void {
             (session_id, message_text, fact_text, topics, sender_id,
              owner_type, owner_id, fact_type, is_internal, captured_at, promoted)
            VALUES (?, 'focus', 'focus', ?, 'system', 'global', 'system', 'fact', 0, datetime('now'), 2)`
-        ).run(context?.sessionKey || "unknown", topicsToJson([topic]));
+        ).run(ctx.sessionKey || "unknown", topicsToJson([topic]));
 
-        return `🎯 Topic forced: ${topic}`;
+        return { text: `🎯 Topic forced: ${topic}` };
       },
     });
 
     // /wiki-ingest — ingest from raw/
-    api.registerCommand("wiki-ingest", {
+    api.registerCommand({
+      name: "wiki-ingest",
       description:
         "Digests files from the raw/ folder (MD, TXT, JSON) and " +
         "transforms them into wiki pages or facts in the database",
-      async execute() {
-        if (!db || !config) return "Plugin not initialized";
+      acceptsArgs: false,
+      requireAuth: false,
+      handler: async () => {
+        if (!db || !config) return { text: "Plugin not initialized" };
 
         const result = await wikiIngest(api, db, config, log);
 
-        return [
-          "📥 Wiki Ingest complete",
-          `- Files processed: ${result.filesProcessed}`,
-          `- Pages created: ${result.pagesCreated}`,
-          `- Pages updated: ${result.pagesUpdated}`,
-          result.errors.length > 0
-            ? `⚠️ Errors:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`
-            : "",
-        ]
-          .filter(Boolean)
-          .join("\n");
+        return {
+          text: [
+            "📥 Wiki Ingest complete",
+            `- Files processed: ${result.filesProcessed}`,
+            `- Pages created: ${result.pagesCreated}`,
+            `- Pages updated: ${result.pagesUpdated}`,
+            result.errors.length > 0
+              ? `⚠️ Errors:\n${result.errors.map((e) => `  - ${e}`).join("\n")}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        };
       },
     });
 
     // /wiki-lint — health check
-    api.registerCommand("wiki-lint", {
+    api.registerCommand({
+      name: "wiki-lint",
       description:
         "Wiki health check: stale pages, orphans, empty, gaps",
-      execute() {
-        if (!db || !config) return "Plugin not initialized";
+      acceptsArgs: false,
+      requireAuth: false,
+      handler: () => {
+        if (!db || !config) return { text: "Plugin not initialized" };
 
         const report = wikiLint(db, config);
 
@@ -526,24 +547,29 @@ function register(api: any): void {
           lines.push("\n✅ No issues found");
         }
 
-        return lines.join("\n");
+        return { text: lines.join("\n") };
       },
     });
 
     // /wiki-sync — incremental update
-    api.registerCommand("wiki-sync", {
+    api.registerCommand({
+      name: "wiki-sync",
       description:
         "Updates wiki from recent changes (last 24h)",
-      execute() {
-        if (!db || !config) return "Plugin not initialized";
+      acceptsArgs: false,
+      requireAuth: false,
+      handler: () => {
+        if (!db || !config) return { text: "Plugin not initialized" };
 
         const result = wikiSync(db, config, log);
 
-        return [
-          "🔄 Wiki Sync complete",
-          `- Pages updated: ${result.pagesUpdated}`,
-          `- Topic index: ${result.topicIndexUpdated ? "regenerated" : "unchanged"}`,
-        ].join("\n");
+        return {
+          text: [
+            "🔄 Wiki Sync complete",
+            `- Pages updated: ${result.pagesUpdated}`,
+            `- Topic index: ${result.topicIndexUpdated ? "regenerated" : "unchanged"}`,
+          ].join("\n"),
+        };
       },
     });
   }
