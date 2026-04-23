@@ -1,0 +1,8 @@
+{
+  "id": "openclaw-memory-wiki-engine",
+  "name": "Memory Wiki Engine",
+  "version": "0.1.0",
+  "description": "Sovereign memory engine with auto-generated wiki, topic-aware classifier, and dream consolidation",
+  "extensions": ["./dist/index.js"],
+  "type": "plugin"
+}
