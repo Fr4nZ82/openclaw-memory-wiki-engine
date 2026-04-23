@@ -62,14 +62,14 @@ let remTimer: ReturnType<typeof setTimeout> | null = null;
 // ---------------------------------------------------------------------------
 
 /**
- * Main plugin function. OpenClaw calls this on load.
+ * Main plugin register function. OpenClaw calls this during plugin initialization.
  *
  * `api` is the object provided by OpenClaw with methods to register
  * hooks, tools, commands, and compaction providers.
  */
-export function activate(api: any): void {
+function register(api: any): void {
   // Read plugin config (from openclaw.json) and merge with defaults
-  const userConfig = api.getPluginConfig?.() ?? {};
+  const userConfig = api.pluginConfig ?? api.getPluginConfig?.() ?? {};
   config = resolveConfig(userConfig);
 
   // Initialize the database (creates tables if needed)
@@ -644,4 +644,19 @@ function extractSenderId(sessionKey: string | undefined): string {
 // Export for OpenClaw plugin loader
 // ---------------------------------------------------------------------------
 
-export default { activate };
+export default {
+  id: "openclaw-memory-wiki-engine",
+  name: "Memory Wiki Engine",
+  description:
+    "Sovereign memory engine with auto-generated wiki, topic-aware classifier, and dream consolidation",
+  kind: "memory" as const,
+  configSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      ollamaUrl: { type: "string" },
+      embeddingModel: { type: "string" },
+    },
+  },
+  register,
+};
