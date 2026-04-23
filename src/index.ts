@@ -68,6 +68,10 @@ let remTimer: ReturnType<typeof setTimeout> | null = null;
  * hooks, tools, commands, and compaction providers.
  */
 function register(api: any): void {
+  // OpenClaw calls register() in multiple modes — only do full init in "full" mode
+  const registrationMode = api.registrationMode;
+  if (registrationMode && registrationMode !== "full") return;
+
   // Read plugin config (from openclaw.json) and merge with defaults
   const userConfig = api.pluginConfig ?? api.getPluginConfig?.() ?? {};
   config = resolveConfig(userConfig);
