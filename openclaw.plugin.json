@@ -4,5 +4,20 @@
   "version": "0.1.0",
   "description": "Sovereign memory engine with auto-generated wiki, topic-aware classifier, and dream consolidation",
   "extensions": ["./dist/index.js"],
-  "type": "plugin"
+  "type": "plugin",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "ollamaUrl": {
+        "type": "string",
+        "description": "Ollama API URL for embeddings",
+        "default": "http://localhost:11434"
+      },
+      "embeddingModel": {
+        "type": "string",
+        "description": "Ollama embedding model name",
+        "default": "nomic-embed-text"
+      }
+    }
+  }
 }
