@@ -457,9 +457,9 @@ function register(api: any): void {
       },
     });
 
-    // /focus <topic> — force session topic
+    // /set-topic <topic> — force session topic
     api.registerCommand({
-      name: "focus",
+      name: "set-topic",
       description: "Forces a topic for the current session",
       acceptsArgs: true,
       requireAuth: false,
@@ -467,7 +467,7 @@ function register(api: any): void {
         if (!db) return { text: "Plugin not initialized" };
 
         const topic = ctx.args?.trim();
-        if (!topic) return { text: "Usage: /focus <topic>" };
+        if (!topic) return { text: "Usage: /set-topic <topic>" };
 
         // Insert a dummy capture with the forced topic
         db.prepare(
