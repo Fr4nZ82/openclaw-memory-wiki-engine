@@ -412,38 +412,7 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
  * Resolves the Gemini API key from available sources.
  */
 async function resolveGeminiApiKey(api: any): Promise<string | null> {
-  // 1. Try OpenClaw's model auth
-  if (api.runtime?.modelAuth?.getApiKeyForModel) {
-    try {
-      const key = await api.runtime.modelAuth.getApiKeyForModel({
-        model: "gemini-2.0-flash",
-        cfg: api.config,
-      });
-      if (key) return key;
-    } catch {
-      // fall through
-    }
-  }
-
-  // 2. Try resolveApiKeyForProvider
-  if (api.runtime?.modelAuth?.resolveApiKeyForProvider) {
-    try {
-      const key = await api.runtime.modelAuth.resolveApiKeyForProvider({
-        provider: "google",
-        cfg: api.config,
-      });
-      if (key) return key;
-    } catch {
-      // fall through
-    }
-  }
-
-  // 3. Environment variable
-  if (process.env.GEMINI_API_KEY) {
-    return process.env.GEMINI_API_KEY;
-  }
-
-  // 4. ~/.openclaw/.env file
+  // 1. ~/.openclaw/.env file (highest priority — known to work for direct REST)
   try {
     const fs = await import("fs");
     const path = await import("path");
@@ -454,6 +423,24 @@ async function resolveGeminiApiKey(api: any): Promise<string | null> {
     if (match) return match[1].trim();
   } catch {
     // fall through
+  }
+
+  // 2. Environment variable
+  if (process.env.GEMINI_API_KEY) {
+    return process.env.GEMINI_API_KEY;
+  }
+
+  // 3. OpenClaw model auth (may return proxy keys, try last)
+  if (api.runtime?.modelAuth?.resolveApiKeyForProvider) {
+    try {
+      const key = await api.runtime.modelAuth.resolveApiKeyForProvider({
+        provider: "google",
+        cfg: api.config,
+      });
+      if (key) return key;
+    } catch {
+      // fall through
+    }
   }
 
   return null;
