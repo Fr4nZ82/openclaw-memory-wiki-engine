@@ -201,7 +201,7 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
         temperature: 0.1,
       },
     }),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(120000),
   });
 
   if (!response.ok) {
