@@ -108,29 +108,25 @@ function resolveEmbeddingUrl(): string {
 // ---------------------------------------------------------------------------
 
 function ensureSchema(db: Database.Database): void {
+  // Only ensure users table — facts table is created by the gateway
+  // with FTS5 triggers etc. If facts doesn't exist, the gateway
+  // hasn't been started yet.
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       sender_id TEXT PRIMARY KEY,
       names     TEXT NOT NULL
     )
   `);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS facts (
-      id          TEXT PRIMARY KEY,
-      fact_text   TEXT NOT NULL,
-      fact_type   TEXT NOT NULL DEFAULT 'fact',
-      owner_type  TEXT NOT NULL DEFAULT 'user',
-      owner_id    TEXT NOT NULL,
-      topics      TEXT,
-      confidence  REAL NOT NULL DEFAULT 1.0,
-      source      TEXT NOT NULL DEFAULT 'init',
-      embedding   BLOB,
-      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
-      superseded_by TEXT,
-      active      INTEGER NOT NULL DEFAULT 1
-    )
-  `);
+
+  // Verify facts table exists (created by gateway)
+  const hasFacts = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='facts'")
+    .get();
+  if (!hasFacts) {
+    throw new Error(
+      "Table 'facts' not found. Start the gateway at least once to initialize the schema."
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -545,8 +541,8 @@ Run ONCE after enrollment. After init, trigger a dream to generate wiki pages:
     console.log("\n💾 Inserting facts into DB...");
 
     const insertFact = db.prepare(`
-      INSERT OR IGNORE INTO facts (id, fact_text, fact_type, owner_type, owner_id, topics, confidence, source, embedding)
-      VALUES (@id, @fact_text, @fact_type, @owner_type, @owner_id, @topics, @confidence, 'init', @embedding)
+      INSERT OR IGNORE INTO facts (id, text, fact_type, owner_type, owner_id, sender_id, topics, confidence, embedding, is_active)
+      VALUES (@id, @text, @fact_type, @owner_type, @owner_id, @sender_id, @topics, @confidence, @embedding, 1)
     `);
 
     // Generate embeddings via Ollama
@@ -555,13 +551,14 @@ Run ONCE after enrollment. After init, trigger a dream to generate wiki pages:
 
     const tx = db.transaction(() => {
       for (const fact of facts) {
-        const id = crypto.randomUUID();
+        const id = `f_init_${crypto.randomUUID().substring(0, 12)}`;
         insertFact.run({
           id,
-          fact_text: fact.fact_text,
+          text: fact.fact_text,
           fact_type: fact.fact_type,
           owner_type: fact.owner_type,
           owner_id: fact.owner_id.toLowerCase(),
+          sender_id: "init",  // marks these as init-sourced
           topics: JSON.stringify(fact.topics || []),
           confidence: fact.confidence ?? 1.0,
           embedding: null, // embeddings added in next pass
@@ -576,7 +573,7 @@ Run ONCE after enrollment. After init, trigger a dream to generate wiki pages:
     console.log("\n🧠 Generating embeddings...");
 
     const updateEmbedding = db.prepare(
-      "UPDATE facts SET embedding = ? WHERE fact_text = ? AND source = 'init'"
+      "UPDATE facts SET embedding = ? WHERE text = ? AND sender_id = 'init'"
     );
 
     for (const fact of facts) {
