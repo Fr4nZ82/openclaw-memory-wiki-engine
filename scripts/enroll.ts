@@ -56,6 +56,7 @@ function resolveDbPath(explicit?: string): string {
 // ---------------------------------------------------------------------------
 
 function ensureSchema(db: Database.Database): void {
+  // Create tables if they don't exist
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       sender_id  TEXT PRIMARY KEY,
@@ -79,6 +80,18 @@ function ensureSchema(db: Database.Database): void {
       FOREIGN KEY (sender_id) REFERENCES users(sender_id)
     )
   `);
+
+  // Incremental migrations — add columns that may be missing on older DBs
+  // SQLite doesn't support ADD COLUMN IF NOT EXISTS, so we catch the error
+  const safeAddColumn = (sql: string) => {
+    try {
+      db.exec(sql);
+    } catch (e: any) {
+      if (!e.message?.includes("duplicate column")) throw e;
+    }
+  };
+
+  safeAddColumn(`ALTER TABLE user_groups ADD COLUMN scope TEXT`);
 }
 
 // ---------------------------------------------------------------------------
