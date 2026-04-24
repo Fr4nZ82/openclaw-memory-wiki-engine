@@ -79,6 +79,11 @@ The plugin supports multi-user memory with group-based scoping. After installati
 
 ```json
 {
+  "users": [
+    { "sender_id": "alice", "names": ["Alice"] },
+    { "sender_id": "bob", "names": ["Bob", "Roberto"] },
+    { "sender_id": "charlie", "names": ["Charlie", "Carlo"] }
+  ],
   "groups": [
     {
       "id": "family",
@@ -89,33 +94,39 @@ The plugin supports multi-user memory with group-based scoping. After installati
         "Regole della casa (orari, turni)",
         "Piani condivisi (vacanze, cene, uscite)"
       ],
-      "members": [
-        { "sender_id": "alice", "role": "admin" },
-        { "sender_id": "bob" },
-        { "sender_id": "charlie" }
-      ]
+      "members": ["alice", "bob", "charlie"]
     }
   ]
 }
 ```
 
+### Users
+
 | Field | Required | Description |
 |-------|----------|-------------|
-| `groups[].id` | ✅ | Unique group identifier (used in DB and wiki paths) |
-| `groups[].name` | ✅ | Human-readable group name |
-| `groups[].description` | ❌ | Optional description |
-| `groups[].scope` | ❌ | Array of strings: what types of facts belong to this group (vs individual profiles). Used by the dream engine to generate the wiki page template. |
-| `groups[].members[].sender_id` | ✅ | User identifier as seen by OpenClaw (Telegram username, Discord ID, etc.) |
-| `groups[].members[].role` | ❌ | `"admin"` or `"member"` (default: `"member"`) |
+| `sender_id` | ✅ | User identifier as seen by OpenClaw (Telegram numeric ID, Discord ID, etc.) |
+| `names` | ✅ | Array of names. **First = canonical** (used as `owner_id` in facts and wiki page slug). Others = aliases for cross-user attribution. |
 
-> **Note**: `sender_id` must match the ID that OpenClaw assigns to incoming messages. For Telegram this is typically the username (lowercase); check your channel's message metadata to confirm.
+> The classifier receives all names in its prompt. When a user says "Francesco likes coffee", the classifier looks up "Francesco" in the known users list, finds it's an alias for "Frodo", and sets `owner_id: "frodo"`.
+
+### Groups
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | ✅ | Unique group identifier (used in DB and wiki paths) |
+| `name` | ✅ | Human-readable group name |
+| `description` | ❌ | Optional description |
+| `scope` | ❌ | Array of strings: what types of facts belong to this group (vs individual profiles). Used by the dream engine to generate the "Scope" section in group wiki pages. |
+| `members` | ✅ | Array of `sender_id` references (must be defined in `users` first) |
+
+> **Note**: `sender_id` must match the ID that OpenClaw assigns to incoming messages. For Telegram this is typically the numeric user ID; check your channel's message metadata to confirm.
 
 **2. Run the enrollment script:**
 
 ```bash
 cd openclaw-memory-wiki-engine
 
-# Import groups and members
+# Import users and groups
 npx tsx scripts/enroll.ts users.json
 
 # Verify what's in the DB
@@ -125,9 +136,9 @@ npx tsx scripts/enroll.ts --dump
 npx tsx scripts/enroll.ts users.json --db /path/to/engine.db
 ```
 
-The operation is **idempotent** — you can edit `users.json` and re-run at any time. Members present in the DB but removed from the file will be cleaned up automatically.
+The operation is **idempotent** — you can edit `users.json` and re-run at any time. Users/members present in the DB but removed from the file will be cleaned up automatically.
 
-**3. Edit cycle:** to update groups later, dump → edit → re-import:
+**3. Edit cycle:** to update users/groups later, dump → edit → re-import:
 
 ```bash
 npx tsx scripts/enroll.ts --dump > users.json

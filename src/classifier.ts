@@ -63,6 +63,13 @@ export interface UserGroupInfo {
   group_name: string;
 }
 
+/** Known user identity (from users table) */
+export interface UserIdentity {
+  sender_id: string;
+  canonical_name: string;  // first name in the array (lowercase for owner_id)
+  all_names: string[];     // all names including aliases
+}
+
 // ---------------------------------------------------------------------------
 // Classification prompt
 // ---------------------------------------------------------------------------
@@ -79,6 +86,7 @@ function buildClassifierPrompt(
   currentMessage: { text: string; sender_id: string; sender_name: string },
   currentSessionTopic: string | null,
   userGroups: UserGroupInfo[],
+  knownUsers: UserIdentity[],
   messageTimestamp: string
 ): string {
   // Format the sliding window
@@ -92,6 +100,19 @@ function buildClassifierPrompt(
       ? userGroups.map((g) => `- ${g.group_id} (${g.group_name})`).join("\n")
       : "- no groups";
 
+  // Format known users for cross-user attribution
+  const currentUser = knownUsers.find((u) => u.sender_id === currentMessage.sender_id);
+  const senderLabel = currentUser
+    ? `${currentUser.canonical_name} (aliases: ${currentUser.all_names.slice(1).join(", ") || "none"})`
+    : currentMessage.sender_name;
+
+  const knownUsersText = knownUsers
+    .map((u) => {
+      const names = u.all_names.join(", ");
+      return `- ${u.canonical_name} (ID: ${u.sender_id}) → known as: ${names}`;
+    })
+    .join("\n");
+
   return `You are a message classifier for a family AI assistant.
 Your task is to analyze ONE message and decide if it contains information worth remembering.
 
@@ -104,10 +125,13 @@ ${currentSessionTopic || "none (session start)"}
 ## User's groups
 ${groupsText}
 
+## Known users
+${knownUsersText || "(no users enrolled)"}
+
 ## Message timestamp
 ${messageTimestamp}
 
-## New message from ${currentMessage.sender_name} (ID: ${currentMessage.sender_id})
+## New message from ${senderLabel}
 "${currentMessage.text}"
 
 ## Instructions
@@ -154,12 +178,13 @@ Analyze the message and respond with valid JSON:
    - "episode" — temporary event (I'm reading a book)
 
 7. **owner_type and owner_id**: who OWNS the fact (not who says it).
-   If ${currentMessage.sender_name} says "Bob doesn't like pesto":
-   → owner_type: "user", owner_id: "bob" (cross-user attribution)
+   owner_id must be the CANONICAL NAME (first name, lowercase) from the known users list.
+   If ${senderLabel} says "Bob doesn't like pesto":
+   → look up Bob in the known users list → use their canonical name as owner_id
    If they say "we need detergent" (family fact):
    → owner_type: "group", owner_id: "${userGroups[0]?.group_id || "family"}"
    If they say "I prefer coffee":
-   → owner_type: "user", owner_id: "${currentMessage.sender_id}"
+   → owner_type: "user", owner_id: "${currentUser?.canonical_name.toLowerCase() || currentMessage.sender_id}"
 
 ### Output
 
@@ -207,12 +232,16 @@ export async function classifyMessage(
     // 3. Get the user's groups
     const userGroups = getUserGroups(db, message.sender_id);
 
+    // 3b. Get all known users (for cross-user attribution)
+    const knownUsers = getAllUsers(db);
+
     // 4. Build the prompt
     const prompt = buildClassifierPrompt(
       windowMessages,
       message,
       currentTopic,
       userGroups,
+      knownUsers,
       message.timestamp
     );
 
@@ -302,6 +331,30 @@ function getUserGroups(
        WHERE m.sender_id = ?`
     )
     .all(senderId) as UserGroupInfo[];
+}
+
+/**
+ * Gets all enrolled users with their names.
+ * Used to populate the classifier prompt for cross-user attribution.
+ */
+function getAllUsers(db: Database.Database): UserIdentity[] {
+  const rows = db
+    .prepare(`SELECT sender_id, names FROM users`)
+    .all() as Array<{ sender_id: string; names: string }>;
+
+  return rows.map((row) => {
+    let allNames: string[];
+    try {
+      allNames = JSON.parse(row.names) as string[];
+    } catch {
+      allNames = [row.sender_id];
+    }
+    return {
+      sender_id: row.sender_id,
+      canonical_name: allNames[0] || row.sender_id,
+      all_names: allNames,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

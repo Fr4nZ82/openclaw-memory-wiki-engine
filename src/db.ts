@@ -234,6 +234,14 @@ const SCHEMA_V1: string[] = [
      END`,
 
   // -----------------------------------------------------------------------
+  // Users (identity map: sender_id → names)
+  // -----------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS users (
+    sender_id  TEXT PRIMARY KEY,
+    names      TEXT NOT NULL     -- JSON array: ["Frodo","Francesco"]. First = canonical
+  )`,
+
+  // -----------------------------------------------------------------------
   // User groups
   // -----------------------------------------------------------------------
   `CREATE TABLE IF NOT EXISTS user_groups (
@@ -246,9 +254,9 @@ const SCHEMA_V1: string[] = [
   `CREATE TABLE IF NOT EXISTS group_members (
     group_id   TEXT NOT NULL,
     sender_id  TEXT NOT NULL,
-    role       TEXT NOT NULL DEFAULT 'member',
     PRIMARY KEY (group_id, sender_id),
-    FOREIGN KEY (group_id) REFERENCES user_groups(id)
+    FOREIGN KEY (group_id) REFERENCES user_groups(id),
+    FOREIGN KEY (sender_id) REFERENCES users(sender_id)
   )`,
 ];
 

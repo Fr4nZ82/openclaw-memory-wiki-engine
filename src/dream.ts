@@ -461,15 +461,32 @@ function generateWikiPage(
 
   // Generate markdown content
   const now = new Date().toISOString().split("T")[0];
+
+  // Resolve human-readable title for entities from users table
+  let pageTitle = owner.owner_id;
+  if (owner.owner_type === "user") {
+    const userRow = db
+      .prepare(`SELECT names FROM users WHERE sender_id = ?`)
+      .get(owner.owner_id) as { names: string } | undefined;
+    if (userRow) {
+      try {
+        const names = JSON.parse(userRow.names) as string[];
+        if (names.length > 0) pageTitle = names[0]; // canonical name
+      } catch {
+        // invalid JSON, use owner_id
+      }
+    }
+  }
+
   const lines: string[] = [
     `---`,
-    `title: ${owner.owner_id}`,
+    `title: ${pageTitle}`,
     `updated: ${now}`,
     `owner_type: ${owner.owner_type}`,
     `auto_generated: true`,
     `---`,
     ``,
-    `# ${owner.owner_id}`,
+    `# ${pageTitle}`,
     ``,
   ];
 

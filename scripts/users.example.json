@@ -1,4 +1,9 @@
 {
+  "users": [
+    { "sender_id": "alice", "names": ["Alice"] },
+    { "sender_id": "bob", "names": ["Bob", "Roberto"] },
+    { "sender_id": "charlie", "names": ["Charlie", "Carlo"] }
+  ],
   "groups": [
     {
       "id": "family",
@@ -7,27 +12,19 @@
       "scope": [
         "Spesa e lista della spesa",
         "Regole della casa (orari, turni)",
-        "Piani condivisi (vacanze, cene, uscite)",
-        "Informazioni sui figli (scuola, sport, salute)"
+        "Piani condivisi (vacanze, cene, uscite)"
       ],
-      "members": [
-        { "sender_id": "alice", "role": "admin" },
-        { "sender_id": "bob" },
-        { "sender_id": "charlie" }
-      ]
+      "members": ["alice", "bob", "charlie"]
     },
     {
       "id": "admin",
       "name": "Admins",
       "description": "System administrators",
       "scope": [
-        "Configurazione tecnica di Sam e degli agenti",
-        "Gestione skill, plugin, e servizi",
-        "Patch e aggiornamenti del sistema"
+        "Configurazione sistema e agenti",
+        "Gestione skill e plugin"
       ],
-      "members": [
-        { "sender_id": "alice", "role": "admin" }
-      ]
+      "members": ["alice"]
     }
   ]
 }
