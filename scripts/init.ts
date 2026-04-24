@@ -427,8 +427,9 @@ This command:
 4. Backs up MEMORY.md and memory/ to .memory-backup/
 5. Removes MEMORY.md and memory/ from the workspace
 
-Run ONCE after enrollment. After init, trigger a dream to generate wiki pages:
-  openclaw plugins run openclaw-memory-wiki-engine dream --mode rem
+Run ONCE after enrollment. The dream engine will generate wiki pages
+automatically on its next scheduled cycle (light: every 6h, REM: 03:00).
+To verify facts were inserted: npx tsx scripts/enroll.ts --dump
     `.trim());
     process.exit(0);
   }
@@ -598,9 +599,9 @@ Run ONCE after enrollment. After init, trigger a dream to generate wiki pages:
     backupAndClean(workspacePath, false);
 
     console.log("\n🎉 Init complete! Next steps:");
-    console.log("   1. Trigger a dream to generate wiki pages:");
-    console.log("      openclaw plugins run openclaw-memory-wiki-engine dream --mode rem");
-    console.log("   2. Verify with: npx tsx scripts/enroll.ts --dump");
+    console.log("   1. Wiki pages will be generated at the next dream cycle (light: 6h, REM: 03:00)");
+    console.log("   2. Verify facts: npx tsx scripts/enroll.ts --dump");
+    console.log("   3. Test recall: send a message to Sam on Telegram");
 
   } finally {
     db.close();
