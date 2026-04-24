@@ -88,8 +88,19 @@ function resolveApiKey(env: Record<string, string>): string {
   );
 }
 
-function resolveEmbeddingUrl(env: Record<string, string>): string {
-  return process.env.EMBEDDING_URL || env.EMBEDDING_URL || "http://localhost:11434";
+function resolveEmbeddingUrl(): string {
+  const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+  const configPath = path.join(home, "openclaw.json");
+
+  if (fs.existsSync(configPath)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const pluginConfig = config?.plugins?.entries?.["openclaw-memory-wiki-engine"]?.config;
+      if (pluginConfig?.ollamaUrl) return pluginConfig.ollamaUrl;
+    } catch { /* fall through to default */ }
+  }
+
+  return "http://localhost:11434";
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +503,7 @@ Run ONCE after enrollment. After init, trigger a dream to generate wiki pages:
     const env = readEnvFile();
     console.log("\n🤖 Calling Gemini Flash to extract facts...");
     const apiKey = resolveApiKey(env);
-    const embeddingUrl = resolveEmbeddingUrl(env);
+    const embeddingUrl = resolveEmbeddingUrl();
 
     // Build prompt and call LLM
     const prompt = buildExtractionPrompt(workspace, knownUsers);
