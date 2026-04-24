@@ -362,32 +362,101 @@ function getAllUsers(db: Database.Database): UserIdentity[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Calls OpenClaw's llm-task for classification.
+ * Calls Gemini Flash directly for classification.
  *
- * llm-task is a built-in OpenClaw tool that allows structured
- * LLM calls (JSON) without spawning a subagent.
+ * Resolves the API key from:
+ *   1. api.runtime.modelAuth.getApiKeyForModel (preferred)
+ *   2. GEMINI_API_KEY env variable (fallback)
+ *   3. ~/.openclaw/.env file (last resort)
+ *
+ * Uses the REST API with JSON response mode for fast, structured output.
  */
 async function callLlmTask(api: any, prompt: string): Promise<string> {
-  // OpenClaw provides api.llmTask() for structured LLM calls
-  if (api.llmTask) {
-    const result = await api.llmTask({
-      prompt,
-      model: "flash",
-      responseFormat: "json",
-    });
-    return typeof result === "string" ? result : JSON.stringify(result);
+  const apiKey = await resolveGeminiApiKey(api);
+  if (!apiKey) {
+    throw new Error("No Gemini API key found (checked api.runtime.modelAuth, env, ~/.openclaw/.env)");
   }
 
-  // Fallback: use api.callTool if llmTask is not available
-  if (api.callTool) {
-    const result = await api.callTool("llm-task", {
-      prompt,
-      model: "flash",
-    });
-    return typeof result === "string" ? result : JSON.stringify(result);
+  const model = "gemini-2.0-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.1,
+        maxOutputTokens: 512,
+      },
+    }),
+    signal: AbortSignal.timeout(15000),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Gemini API error ${response.status}: ${text.substring(0, 200)}`);
   }
 
-  throw new Error("No method available to call the LLM");
+  const data = await response.json() as any;
+  const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!content) {
+    throw new Error("Empty response from Gemini");
+  }
+
+  return content;
+}
+
+/**
+ * Resolves the Gemini API key from available sources.
+ */
+async function resolveGeminiApiKey(api: any): Promise<string | null> {
+  // 1. Try OpenClaw's model auth
+  if (api.runtime?.modelAuth?.getApiKeyForModel) {
+    try {
+      const key = await api.runtime.modelAuth.getApiKeyForModel({
+        model: "gemini-2.0-flash",
+        cfg: api.config,
+      });
+      if (key) return key;
+    } catch {
+      // fall through
+    }
+  }
+
+  // 2. Try resolveApiKeyForProvider
+  if (api.runtime?.modelAuth?.resolveApiKeyForProvider) {
+    try {
+      const key = await api.runtime.modelAuth.resolveApiKeyForProvider({
+        provider: "google",
+        cfg: api.config,
+      });
+      if (key) return key;
+    } catch {
+      // fall through
+    }
+  }
+
+  // 3. Environment variable
+  if (process.env.GEMINI_API_KEY) {
+    return process.env.GEMINI_API_KEY;
+  }
+
+  // 4. ~/.openclaw/.env file
+  try {
+    const fs = await import("fs");
+    const path = await import("path");
+    const os = await import("os");
+    const envPath = path.join(os.homedir(), ".openclaw", ".env");
+    const content = fs.readFileSync(envPath, "utf-8");
+    const match = content.match(/^GEMINI_API_KEY=(.+)$/m);
+    if (match) return match[1].trim();
+  } catch {
+    // fall through
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
