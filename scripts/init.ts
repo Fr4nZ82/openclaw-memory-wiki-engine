@@ -54,17 +54,25 @@ function resolveWorkspacePath(explicit?: string): string {
 }
 
 function readEnvFile(): Record<string, string> {
-  const envPath = path.join(__dirname, "..", ".env");
   const result: Record<string, string> = {};
-  if (!fs.existsSync(envPath)) return result;
 
-  const envContent = fs.readFileSync(envPath, "utf-8");
-  for (const line of envContent.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("#") || !trimmed.includes("=")) continue;
-    const [key, ...rest] = trimmed.split("=");
-    const val = rest.join("=").trim().replace(/^["']|["']$/g, "");
-    if (key.trim() && val) result[key.trim()] = val;
+  // Check both: plugin dir and OPENCLAW_HOME
+  const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+  const candidates = [
+    path.join(__dirname, "..", ".env"),       // plugin root
+    path.join(openclawHome, ".env"),          // ~/.openclaw/.env
+  ];
+
+  for (const envPath of candidates) {
+    if (!fs.existsSync(envPath)) continue;
+    const envContent = fs.readFileSync(envPath, "utf-8");
+    for (const line of envContent.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+      const [key, ...rest] = trimmed.split("=");
+      const val = rest.join("=").trim().replace(/^["']|["']$/g, "");
+      if (key.trim() && val) result[key.trim()] = val;
+    }
   }
   return result;
 }
