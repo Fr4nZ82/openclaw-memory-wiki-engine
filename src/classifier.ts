@@ -377,7 +377,7 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
     throw new Error("No Gemini API key found (checked api.runtime.modelAuth, env, ~/.openclaw/.env)");
   }
 
-  const model = "gemini-2.0-flash";
+  const model = "gemini-3-flash-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   const response = await fetch(url, {
