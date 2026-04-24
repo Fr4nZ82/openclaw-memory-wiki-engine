@@ -71,6 +71,70 @@ openclaw config set plugins.slots.memory "openclaw-memory-wiki-engine"
 openclaw gateway restart
 ```
 
+### User enrollment
+
+The plugin supports multi-user memory with group-based scoping. After installation, enroll your users and groups using the CLI tool:
+
+**1. Create a `users.json` file** (see `scripts/users.example.json`):
+
+```json
+{
+  "groups": [
+    {
+      "id": "family",
+      "name": "Family",
+      "description": "Core family group",
+      "scope": [
+        "Spesa e lista della spesa",
+        "Regole della casa (orari, turni)",
+        "Piani condivisi (vacanze, cene, uscite)"
+      ],
+      "members": [
+        { "sender_id": "alice", "role": "admin" },
+        { "sender_id": "bob" },
+        { "sender_id": "charlie" }
+      ]
+    }
+  ]
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `groups[].id` | ✅ | Unique group identifier (used in DB and wiki paths) |
+| `groups[].name` | ✅ | Human-readable group name |
+| `groups[].description` | ❌ | Optional description |
+| `groups[].scope` | ❌ | Array of strings: what types of facts belong to this group (vs individual profiles). Used by the dream engine to generate the wiki page template. |
+| `groups[].members[].sender_id` | ✅ | User identifier as seen by OpenClaw (Telegram username, Discord ID, etc.) |
+| `groups[].members[].role` | ❌ | `"admin"` or `"member"` (default: `"member"`) |
+
+> **Note**: `sender_id` must match the ID that OpenClaw assigns to incoming messages. For Telegram this is typically the username (lowercase); check your channel's message metadata to confirm.
+
+**2. Run the enrollment script:**
+
+```bash
+cd openclaw-memory-wiki-engine
+
+# Import groups and members
+npx tsx scripts/enroll.ts users.json
+
+# Verify what's in the DB
+npx tsx scripts/enroll.ts --dump
+
+# Use a custom DB path if needed
+npx tsx scripts/enroll.ts users.json --db /path/to/engine.db
+```
+
+The operation is **idempotent** — you can edit `users.json` and re-run at any time. Members present in the DB but removed from the file will be cleaned up automatically.
+
+**3. Edit cycle:** to update groups later, dump → edit → re-import:
+
+```bash
+npx tsx scripts/enroll.ts --dump > users.json
+# edit users.json
+npx tsx scripts/enroll.ts users.json
+```
+
 ## Configuration
 
 All settings are optional — defaults work out of the box. Configure via `openclaw.json` under `plugins.entries`:

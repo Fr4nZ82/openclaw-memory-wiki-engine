@@ -239,7 +239,8 @@ const SCHEMA_V1: string[] = [
   `CREATE TABLE IF NOT EXISTS user_groups (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
-    description TEXT
+    description TEXT,
+    scope       TEXT          -- JSON array: describes what facts belong to this group
   )`,
 
   `CREATE TABLE IF NOT EXISTS group_members (

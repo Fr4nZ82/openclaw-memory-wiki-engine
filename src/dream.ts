@@ -473,6 +473,45 @@ function generateWikiPage(
     ``,
   ];
 
+  // For groups: add a "Scope" section from user_groups.scope
+  // This describes what types of facts belong to this group
+  // vs individual profiles — guides the classifier and the user.
+  if (owner.owner_type === "group") {
+    const groupRow = db
+      .prepare(`SELECT name, description, scope FROM user_groups WHERE id = ?`)
+      .get(owner.owner_id) as
+      | { name: string; description: string | null; scope: string | null }
+      | undefined;
+
+    if (groupRow) {
+      lines[lines.indexOf(`# ${owner.owner_id}`)] = `# ${groupRow.name}`;
+
+      if (groupRow.description) {
+        lines.push(`> ${groupRow.description}`);
+        lines.push(``);
+      }
+
+      if (groupRow.scope) {
+        try {
+          const scopeItems = JSON.parse(groupRow.scope) as string[];
+          if (scopeItems.length > 0) {
+            lines.push(`## Scope — cosa appartiene a questo gruppo`);
+            for (const item of scopeItems) {
+              lines.push(`- ${item}`);
+            }
+            lines.push(``);
+            lines.push(
+              `> Tutto ciò che NON rientra nello scope va nei profili individuali.`
+            );
+            lines.push(``);
+          }
+        } catch {
+          // scope non è JSON valido, skip
+        }
+      }
+    }
+  }
+
   // Group by fact_type
   const grouped: Record<string, typeof facts> = {};
   for (const fact of facts) {
