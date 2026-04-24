@@ -52,6 +52,36 @@ function resolveDbPath(explicit?: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Ensure schema exists (enroll runs standalone, not through the gateway)
+// ---------------------------------------------------------------------------
+
+function ensureSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      sender_id  TEXT PRIMARY KEY,
+      names      TEXT NOT NULL
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_groups (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      description TEXT,
+      scope       TEXT
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS group_members (
+      group_id   TEXT NOT NULL,
+      sender_id  TEXT NOT NULL,
+      PRIMARY KEY (group_id, sender_id),
+      FOREIGN KEY (group_id) REFERENCES user_groups(id),
+      FOREIGN KEY (sender_id) REFERENCES users(sender_id)
+    )
+  `);
+}
+
+// ---------------------------------------------------------------------------
 // Validate enrollment file
 // ---------------------------------------------------------------------------
 
@@ -326,6 +356,7 @@ from the file are removed.
 
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
+  ensureSchema(db);
 
   try {
     if (isDump) {
