@@ -30,6 +30,35 @@ import {
 } from "./embedding";
 
 // ---------------------------------------------------------------------------
+// Identity resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves a Telegram sender_id (e.g. "7776007798") to the canonical
+ * owner_id used in facts (e.g. "frodo").
+ *
+ * Looks up the users table: sender_id → names[0] (canonical) → lowercase.
+ * Falls back to the raw senderId if not found.
+ */
+function resolveCanonicalId(
+  db: Database.Database,
+  senderId: string
+): string {
+  const row = db
+    .prepare("SELECT names FROM users WHERE sender_id = ?")
+    .get(senderId) as { names: string } | undefined;
+
+  if (!row) return senderId;
+
+  try {
+    const names = JSON.parse(row.names) as string[];
+    return names[0]?.toLowerCase() || senderId;
+  } catch {
+    return senderId;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -84,6 +113,9 @@ export async function buildRecallContext(
   // Rough estimate: 1 token ≈ 4 characters
   let charBudget = config.recallBudgetTokens * 4;
 
+  // Resolve Telegram numeric ID → canonical owner_id (e.g. "frodo")
+  const canonicalId = resolveCanonicalId(db, senderId);
+
   // -----------------------------------------------------------------
   // 1. MEMORY.md — operational rules (always on top)
   // -----------------------------------------------------------------
@@ -127,7 +159,7 @@ export async function buildRecallContext(
       db,
       config,
       userQuery,
-      senderId,
+      canonicalId,
       config.recallTopK
     );
     details.vectorSearchUsed = facts.vectorUsed;
