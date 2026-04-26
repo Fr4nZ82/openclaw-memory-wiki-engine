@@ -24,6 +24,9 @@ import {
   type ClassificationResult,
 } from "./classifier";
 import { topicsToJson } from "./utils";
+import { dbg } from "./debug";
+
+const log = dbg("capture");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -125,14 +128,17 @@ export async function processUserMessage(
   // Step 1 — Archive: ALWAYS save the raw message
   archiveMessage(db, message, null);
   stats.archived = true;
+  log(`archived: "${message.text.substring(0, 50)}" sender=${message.sender_id} session=${message.session_id}`);
 
   // Filter messages too short to classify
   if (message.text.trim().length < 5) {
     stats.skipped_reason = "message too short";
+    log(`skipped: message too short (${message.text.trim().length} chars)`);
     return stats;
   }
 
   // Step 2 — Classify the message
+  log(`classifying message...`);
   const classification = await classifyMessage(
     api,
     db,
@@ -147,28 +153,33 @@ export async function processUserMessage(
   );
   stats.classified = true;
   stats.classification = classification;
+  log(`classified: memorable=${classification.is_memorable}, task=${classification.is_task}, type=${classification.fact_type}, topics=${JSON.stringify(classification.topics)}`);
 
   // Step 3 — Evaluate whether to capture
 
   // 3a. Tasks and appointments → skills handle these, we skip
   if (classification.is_task && !classification.is_memorable) {
     stats.skipped_reason = "is_task (handled by skills)";
+    log(`skipped: is_task`);
     return stats;
   }
 
   // 3b. Not memorable → skip
   if (!classification.is_memorable) {
     stats.skipped_reason = "not memorable";
+    log(`skipped: not memorable`);
     return stats;
   }
 
   // 3c. Empty fact_text → skip (classifier didn't extract anything)
   if (!classification.fact_text) {
     stats.skipped_reason = "empty fact_text";
+    log(`skipped: empty fact_text (classifier returned memorable=true but no text)`);
     return stats;
   }
 
   // Step 4 — Save to captures
+  log(`SAVING CAPTURE: fact="${classification.fact_text}", owner=${classification.owner_id}, type=${classification.fact_type}`);
   saveCapture(db, message, classification);
   stats.captured = true;
 

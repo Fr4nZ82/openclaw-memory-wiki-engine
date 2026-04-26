@@ -22,12 +22,15 @@ import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
 import type { Fact } from "./db";
 import { jsonToTopics } from "./utils";
+import { dbg } from "./debug";
 import {
   generateEmbedding,
   isOllamaAvailable,
   cosineSimilarity,
   deserializeEmbedding,
 } from "./embedding";
+
+const log = dbg("recall");
 
 // ---------------------------------------------------------------------------
 // Identity resolution
@@ -48,12 +51,18 @@ function resolveCanonicalId(
     .prepare("SELECT names FROM users WHERE sender_id = ?")
     .get(senderId) as { names: string } | undefined;
 
-  if (!row) return senderId;
+  if (!row) {
+    log(`resolveCanonicalId: sender=${senderId} NOT FOUND in users table`);
+    return senderId;
+  }
 
   try {
     const names = JSON.parse(row.names) as string[];
-    return names[0]?.toLowerCase() || senderId;
+    const canonical = names[0]?.toLowerCase() || senderId;
+    log(`resolveCanonicalId: sender=${senderId} → ${canonical}`);
+    return canonical;
   } catch {
+    log(`resolveCanonicalId: sender=${senderId} → parse error, using raw ID`);
     return senderId;
   }
 }
@@ -115,6 +124,7 @@ export async function buildRecallContext(
 
   // Resolve Telegram numeric ID → canonical owner_id (e.g. "frodo")
   const canonicalId = resolveCanonicalId(db, senderId);
+  log(`buildRecallContext: sender=${senderId}, canonical=${canonicalId}, session=${sessionId}, query="${userQuery.substring(0, 50)}"`);
 
   // -----------------------------------------------------------------
   // 1. MEMORY.md — operational rules (always on top)

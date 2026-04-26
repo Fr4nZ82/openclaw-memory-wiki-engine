@@ -32,6 +32,7 @@
 import type Database from "better-sqlite3";
 import { resolveConfig, type PluginConfig } from "./config";
 import { topicsToJson } from "./utils";
+import { dbg, resetDebugLog } from "./debug";
 // NOTE: db.ts is NOT imported at the top level to avoid eagerly loading
 // the better-sqlite3 native addon. It's loaded dynamically inside getDb().
 import {
@@ -49,6 +50,8 @@ import {
   searchArchive,
   getWikiStatus,
 } from "./wiki-manager";
+
+const dlog = dbg("hooks");
 
 // ---------------------------------------------------------------------------
 // Plugin state
@@ -102,7 +105,9 @@ function register(api: any): void {
   // for lightweight CLI commands (hooks list, status, help, etc.).
 
   // Startup log
-  const log = api.getLogger?.("memory-wiki-engine") ?? console;
+  const ocLog = api.getLogger?.("memory-wiki-engine") ?? console;
+  resetDebugLog();
+  dlog(`Plugin register() called. mode=${registrationMode}, config resolved.`);
 
   // -------------------------------------------------------------------
   // Hook: message_received — capture user messages
@@ -112,13 +117,13 @@ function register(api: any): void {
     api.on("message_received", async (event: any) => {
       const database = getDb();
       if (!database || !config) {
-        console.log(`[RUMORE] Hook skipped: db=${!!database}, config=${!!config}`);
+        dlog(`Hook message_received SKIPPED: db=${!!database}, config=${!!config}`);
         return;
       }
 
       try {
-        console.log(`[RUMORE] event keys: ${Object.keys(event).join(', ')}`)
-        console.log(`[RUMORE] event.from=${event.from}, event.metadata=${JSON.stringify(event.metadata || {})}`);
+        dlog(`event keys: ${Object.keys(event).join(', ')}`);
+        dlog(`event.from=${event.from}, metadata=${JSON.stringify(event.metadata || {})}`);
 
         // SDK hook event shape (from Hooks docs):
         //   from, content, timestamp, metadata { senderId, senderName, channelId, guildId }
@@ -126,7 +131,7 @@ function register(api: any): void {
         const senderName = event.metadata?.senderName || event.from || "unknown";
         const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || "unknown";
 
-        console.log(`[RUMORE] Resolved sender: id=${senderId}, name=${senderName}, session=${sessionKey}`);
+        dlog(`Resolved sender: id=${senderId}, name=${senderName}, session=${sessionKey}`);
 
         const message: IncomingMessage = {
           text: event.content || event.text || "",
@@ -140,25 +145,25 @@ function register(api: any): void {
         // Skip empty messages
         if (!message.text.trim()) return;
 
-        console.log(`[RUMORE] index.ts hook entry: "${message.text.substring(0, 50)}" sender=${message.sender_id}`);
+        dlog(`processUserMessage START: "${message.text.substring(0, 60)}" sender=${message.sender_id}`);
 
         const stats = await processUserMessage(api, database, config, message);
 
-        console.log(`[RUMORE] index.ts hook result: captured=${stats.captured}, skipped=${stats.skipped_reason || 'none'}`);
+        dlog(`processUserMessage END: captured=${stats.captured}, classified=${stats.classified}, skipped=${stats.skipped_reason || 'none'}`);
 
         if (stats.captured) {
-          log.info(
+          ocLog.info(
             `[Capture] ✅ "${message.text.substring(0, 40)}..." → ` +
               `topics: [${stats.classification?.topics.join(", ")}], ` +
-              `type: ${stats.classification?.fact_type}`
+              `type: ${stats.classification?.fact_type}, ` +
+              `owner: ${stats.classification?.owner_id}`
           );
         } else if (stats.skipped_reason) {
-          log.debug(
-            `[Capture] ⏭ "${message.text.substring(0, 30)}..." — ${stats.skipped_reason}`
-          );
+          dlog(`[Capture] ⏭ "${message.text.substring(0, 30)}..." — ${stats.skipped_reason}`);
         }
       } catch (error) {
-        log.warn("[Capture] Error processing message:", error);
+        ocLog.warn("[Capture] Error processing message:", error);
+        dlog(`[Capture] UNHANDLED ERROR: ${error}`);
       }
     });
 
@@ -171,20 +176,25 @@ function register(api: any): void {
       if (!database) return;
 
       try {
+        const text = event.content || event.text || "";
+        const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || "unknown";
+
         const message: IncomingMessage = {
-          text: event.text || event.content || "",
+          text,
           sender_id: "assistant",
           sender_name: "Assistant",
-          session_id: event.sessionKey || "unknown",
+          session_id: sessionKey,
           role: "assistant",
           timestamp: new Date().toISOString(),
         };
 
         if (!message.text.trim()) return;
 
+        dlog(`message_sending archived: "${text.substring(0, 50)}..." session=${sessionKey}`);
         processAssistantMessage(database, message, null);
       } catch (error) {
-        log.warn("[Archive] Error archiving response:", error);
+        ocLog.warn("[Archive] Error archiving response:", error);
+        dlog(`[Archive] UNHANDLED ERROR: ${error}`);
       }
     });
 
@@ -194,12 +204,18 @@ function register(api: any): void {
 
     api.on("before_prompt_build", async (event: any) => {
       const database = getDb();
-      if (!database || !config) return;
+      if (!database || !config) {
+        dlog(`before_prompt_build SKIPPED: db=${!!database}, config=${!!config}`);
+        return;
+      }
 
       try {
-        const userQuery = event.lastUserMessage || event.text || "";
-        const senderId = extractSenderId(event.sessionKey);
-        const sessionId = event.sessionKey || "unknown";
+        dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
+        const userQuery = event.lastUserMessage || event.text || event.content || "";
+        const senderId = event.metadata?.senderId || event.from || "unknown";
+        const sessionId = event.metadata?.sessionKey || event.metadata?.channelId || "unknown";
+
+        dlog(`before_prompt_build: query="${userQuery.substring(0, 50)}", sender=${senderId}, session=${sessionId}`);
 
         const recallCtx = await buildRecallContext(
           database,
@@ -214,14 +230,10 @@ function register(api: any): void {
           event.addSystemContext(recallCtx.systemContext);
         }
 
-        log.debug(
-          `[Recall] ${recallCtx.estimatedTokens} tokens injected — ` +
-            `wiki: ${recallCtx.details.wikiPagesMatched}, ` +
-            `facts: ${recallCtx.details.factsMatched}, ` +
-            `vector: ${recallCtx.details.vectorSearchUsed}`
-        );
+        dlog(`[Recall] ${recallCtx.estimatedTokens} tokens injected — wiki: ${recallCtx.details.wikiPagesMatched}, facts: ${recallCtx.details.factsMatched}, captures: ${recallCtx.details.capturesFound}, vector: ${recallCtx.details.vectorSearchUsed}`);
       } catch (error) {
-        log.warn("[Recall] Error injecting context:", error);
+        ocLog.warn("[Recall] Error injecting context:", error);
+        dlog(`[Recall] UNHANDLED ERROR: ${error}`);
         // Don't block the response if recall fails
       }
     });

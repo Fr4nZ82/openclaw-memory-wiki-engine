@@ -1,12 +1,9 @@
 import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { dbg } from "./debug";
 
-const RUMORE_LOG = "/tmp/classifier_debug.log";
-function rumore(msg: string) {
-  const ts = new Date().toISOString();
-  const line = `[${ts}] ${msg}\n`;
-  console.log(`[RUMORE] ${msg.substring(0, 120)}`);
-  try { fs.appendFileSync(RUMORE_LOG, line); } catch {}
-}
+const log = dbg("classifier");
 
 /**
  * classifier.ts — Message classifier
@@ -246,12 +243,12 @@ export async function classifyMessage(
     // 3b. Get all known users (for cross-user attribution)
     const knownUsers = getAllUsers(db);
 
-    rumore(`classifyMessage: sender=${message.sender_id}, name=${message.sender_name}, session=${sessionId}`);
-    rumore(`classifyMessage: windowMessages=${windowMessages.length}, currentTopic=${currentTopic}, groups=${userGroups.length}`);
-    rumore(`classifyMessage: knownUsers=${JSON.stringify(knownUsers.map(u => ({ id: u.sender_id, canonical: u.canonical_name })))}`);
+    log(`classifyMessage: sender=${message.sender_id}, name=${message.sender_name}, session=${sessionId}`);
+    log(`classifyMessage: windowMessages=${windowMessages.length}, currentTopic=${currentTopic}, groups=${userGroups.length}`);
+    log(`classifyMessage: knownUsers=${JSON.stringify(knownUsers.map(u => ({ id: u.sender_id, canonical: u.canonical_name })))}`);
 
     const currentUser = knownUsers.find((u) => u.sender_id === message.sender_id);
-    rumore(`classifyMessage: currentUser match=${currentUser ? currentUser.canonical_name : 'NOT FOUND (sender_id mismatch!)'}`);
+    log(`classifyMessage: currentUser match=${currentUser ? currentUser.canonical_name : 'NOT FOUND (sender_id mismatch!)'}`);
 
     // 4. Build the prompt
     const prompt = buildClassifierPrompt(
@@ -263,23 +260,22 @@ export async function classifyMessage(
       message.timestamp
     );
 
-    rumore(`PROMPT (first 300 chars): ${prompt.substring(0, 300)}`);
-    rumore(`PROMPT (last 300 chars): ${prompt.substring(prompt.length - 300)}`);
+    log(`PROMPT (first 500 chars): ${prompt.substring(0, 500)}`);
+    log(`PROMPT (last 300 chars): ${prompt.substring(prompt.length - 300)}`);
 
-    // 5. Call the LLM via llm-task
-    rumore(`Calling callLlmTask...`);
+    // 5. Call the LLM
+    log(`Calling Gemini Flash...`);
     const response = await callLlmTask(api, prompt);
-    rumore(`FULL GEMINI RESPONSE:\n${response}`);
+    log(`FULL GEMINI RESPONSE:\n${response}`);
 
     // 6. Parse the response
     const result = parseClassification(response, message.sender_id);
-    rumore(`PARSED RESULT: ${JSON.stringify(result)}`);
+    log(`PARSED: memorable=${result.is_memorable}, topics=${JSON.stringify(result.topics)}, owner=${result.owner_id}, fact_type=${result.fact_type}, fact_text="${result.fact_text}"`);
     return result;
   } catch (error) {
     // Safe fallback: don't memorize on error
-    console.warn(`[RUMORE] Classification FAILED:`, error);
-    const log = api.getLogger?.("memory-wiki-engine") ?? console;
-    log.warn("[Classifier] Classification error, falling back to non-memorable:", error);
+    console.warn(`[Classifier] Classification error, falling back to non-memorable:`, error);
+    log(`CLASSIFICATION FAILED: ${error}`);
     return createFallbackResult(message.sender_id);
   }
 }
@@ -384,6 +380,83 @@ function getAllUsers(db: Database.Database): UserIdentity[] {
 }
 
 // ---------------------------------------------------------------------------
+// Shared API audit (writes to same apiaudit.txt used by samvise-hooks)
+// ---------------------------------------------------------------------------
+
+const AUDIT_FILE = path.join(os.homedir(), ".openclaw", "apiaudit.txt");
+const AUDIT_LOCK = AUDIT_FILE + ".lock";
+const MAX_AUDIT_ENTRIES = 20;
+const LOCK_RETRIES = 5;
+const LOCK_WAIT_MS = 50;
+
+/** Spins until the lock file can be exclusively created, or gives up. */
+function acquireAuditLock(): boolean {
+  for (let i = 0; i < LOCK_RETRIES; i++) {
+    try {
+      fs.writeFileSync(AUDIT_LOCK, String(process.pid), { flag: "wx" });
+      return true;
+    } catch (e: any) {
+      if (e.code !== "EEXIST") return false;
+      const start = Date.now();
+      while (Date.now() - start < LOCK_WAIT_MS) {
+        /* spin */
+      }
+    }
+  }
+  return false;
+}
+
+function releaseAuditLock(): void {
+  try {
+    fs.unlinkSync(AUDIT_LOCK);
+  } catch {
+    /* already removed */
+  }
+}
+
+/**
+ * Appends a classifier API call entry to the shared apiaudit.txt.
+ * Same format as openclaw-samvise-hooks/audit.ts so all LLM calls
+ * (gateway + direct) appear in one file.
+ * Protected by a lock file to avoid corruption from concurrent writes.
+ */
+function writeClassifierAudit(prompt: string, model: string): void {
+  if (!acquireAuditLock()) return; // skip silently — don't block the pipeline
+
+  try {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      event: "classifier_direct_call",
+      agentId: "memory-wiki-engine",
+      provider: "google",
+      model,
+      imagesCount: 0,
+      systemPrompt: prompt.substring(0, 500) + (prompt.length > 500 ? "..." : ""),
+      messagesCount: 1,
+      messages: [{ role: "user", content: prompt.substring(0, 200) + "..." }],
+    };
+
+    let history: unknown[] = [];
+    if (fs.existsSync(AUDIT_FILE)) {
+      try {
+        history = JSON.parse(fs.readFileSync(AUDIT_FILE, "utf-8"));
+        if (!Array.isArray(history)) history = [];
+      } catch {
+        history = [];
+      }
+    }
+
+    history.push(entry);
+    history = history.slice(-MAX_AUDIT_ENTRIES);
+    fs.writeFileSync(AUDIT_FILE, JSON.stringify(history, null, 2), "utf-8");
+  } catch {
+    // Never block the classifier pipeline for audit failures
+  } finally {
+    releaseAuditLock();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // LLM
 // ---------------------------------------------------------------------------
 
@@ -431,6 +504,9 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
     throw new Error("Empty response from Gemini");
   }
 
+  // Log to shared apiaudit.txt (same file as samvise-hooks audit)
+  writeClassifierAudit(prompt, model);
+
   return content;
 }
 
@@ -442,11 +518,7 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
  * resolution fails.
  */
 async function resolveGeminiApiKey(api: any): Promise<string | null> {
-  const log = api.getLogger?.("memory-wiki-engine") ?? console;
-
-  console.log(`[RUMORE] resolveGeminiApiKey called. Has modelAuth: ${!!api.runtime?.modelAuth}`);
-  console.log(`[RUMORE] Has resolveApiKeyForProvider: ${!!api.runtime?.modelAuth?.resolveApiKeyForProvider}`);
-  console.log(`[RUMORE] Has getApiKeyForModel: ${!!api.runtime?.modelAuth?.getApiKeyForModel}`);
+  log(`resolveGeminiApiKey: modelAuth=${!!api.runtime?.modelAuth}, resolveForProvider=${!!api.runtime?.modelAuth?.resolveApiKeyForProvider}, getForModel=${!!api.runtime?.modelAuth?.getApiKeyForModel}`);
 
   // 1. Try resolveApiKeyForProvider (provider-level resolution)
   if (api.runtime?.modelAuth?.resolveApiKeyForProvider) {
@@ -455,13 +527,13 @@ async function resolveGeminiApiKey(api: any): Promise<string | null> {
         provider: "google",
         cfg: api.config,
       });
-      console.log(`[RUMORE] resolveApiKeyForProvider returned: type=${typeof result}, keys=${result ? Object.keys(result) : 'null'}`);
+      log(`resolveApiKeyForProvider returned: type=${typeof result}, keys=${result ? Object.keys(result) : 'null'}`);
       const key = typeof result === "string" ? result : result?.apiKey;
-      console.log(`[RUMORE] Extracted key: ${key ? key.substring(0, 8) + '...' + key.substring(key.length - 4) : 'NULL'}`);
+      log(`Extracted key: ${key ? key.substring(0, 8) + '...' + key.substring(key.length - 4) : 'NULL'}`);
       if (key && typeof key === "string") return key;
     } catch (e) {
-      console.warn(`[RUMORE] resolveApiKeyForProvider THREW:`, e);
-      log.warn("[Classifier] resolveApiKeyForProvider failed, trying fallback:", e);
+      log(`resolveApiKeyForProvider THREW: ${e}`);
+      console.warn("[Classifier] resolveApiKeyForProvider failed, trying fallback:", e);
     }
   }
 
@@ -472,17 +544,17 @@ async function resolveGeminiApiKey(api: any): Promise<string | null> {
         model: "gemini-3-flash-preview",
         cfg: api.config,
       });
-      console.log(`[RUMORE] getApiKeyForModel returned: type=${typeof result}, keys=${result ? Object.keys(result) : 'null'}`);
+      log(`getApiKeyForModel returned: type=${typeof result}, keys=${result ? Object.keys(result) : 'null'}`);
       const key = typeof result === "string" ? result : result?.apiKey;
-      console.log(`[RUMORE] Fallback key: ${key ? key.substring(0, 8) + '...' + key.substring(key.length - 4) : 'NULL'}`);
+      log(`Fallback key: ${key ? key.substring(0, 8) + '...' + key.substring(key.length - 4) : 'NULL'}`);
       if (key && typeof key === "string") return key;
     } catch (e) {
-      console.warn(`[RUMORE] getApiKeyForModel THREW:`, e);
-      log.warn("[Classifier] getApiKeyForModel failed:", e);
+      log(`getApiKeyForModel THREW: ${e}`);
+      console.warn("[Classifier] getApiKeyForModel failed:", e);
     }
   }
 
-  console.warn(`[RUMORE] ALL key resolution methods failed — returning null`);
+  log(`ALL key resolution methods FAILED — returning null`);
   return null;
 }
 
