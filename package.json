@@ -13,8 +13,7 @@
     "type": "plugin",
     "displayName": "Memory Wiki Engine",
     "description": "Sovereign memory engine with auto-generated wiki, topic-aware classifier, and dream consolidation",
-    "extensions": ["./dist/index.js"],
-    "hooks": ["./dist/index.js"]
+    "extensions": ["./dist/index.js"]
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0"
