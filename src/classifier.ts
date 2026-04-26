@@ -412,25 +412,7 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
  * Resolves the Gemini API key from available sources.
  */
 async function resolveGeminiApiKey(api: any): Promise<string | null> {
-  // 1. ~/.openclaw/.env file (highest priority — known to work for direct REST)
-  try {
-    const fs = await import("fs");
-    const path = await import("path");
-    const os = await import("os");
-    const envPath = path.join(os.homedir(), ".openclaw", ".env");
-    const content = fs.readFileSync(envPath, "utf-8");
-    const match = content.match(/^GEMINI_API_KEY=(.+)$/m);
-    if (match) return match[1].trim();
-  } catch {
-    // fall through
-  }
-
-  // 2. Environment variable
-  if (process.env.GEMINI_API_KEY) {
-    return process.env.GEMINI_API_KEY;
-  }
-
-  // 3. OpenClaw model auth (may return proxy keys, try last)
+  // OpenClaw model auth (Gateway provides the key based on its configuration)
   if (api.runtime?.modelAuth?.resolveApiKeyForProvider) {
     try {
       const key = await api.runtime.modelAuth.resolveApiKeyForProvider({
@@ -438,8 +420,9 @@ async function resolveGeminiApiKey(api: any): Promise<string | null> {
         cfg: api.config,
       });
       if (key) return key;
-    } catch {
-      // fall through
+    } catch (e) {
+      const log = api.getLogger?.("memory-wiki-engine") ?? console;
+      log.warn("Failed to resolve API key via gateway auth", e);
     }
   }
 

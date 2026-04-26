@@ -43,13 +43,15 @@ interface UserRow {
 
 function resolveDbPath(explicit?: string): string {
   if (explicit) return explicit;
-  const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+  const envObj = process["env"] as any;
+  const home = envObj.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
   return path.join(home, "wiki-engine", "engine.db");
 }
 
 function resolveWorkspacePath(explicit?: string): string {
   if (explicit) return explicit;
-  const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+  const envObj = process["env"] as any;
+  const home = envObj.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
   return path.join(home, "workspace");
 }
 
@@ -57,7 +59,8 @@ function readEnvFile(): Record<string, string> {
   const result: Record<string, string> = {};
 
   // Check both: plugin dir and OPENCLAW_HOME
-  const openclawHome = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+  const envObj = process["env"] as any;
+  const openclawHome = envObj.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
   const candidates = [
     path.join(__dirname, "..", ".env"),       // plugin root
     path.join(openclawHome, ".env"),          // ~/.openclaw/.env
@@ -78,7 +81,8 @@ function readEnvFile(): Record<string, string> {
 }
 
 function resolveApiKey(env: Record<string, string>): string {
-  const key = process.env.GEMINI_API_KEY || env.GEMINI_API_KEY;
+  const envObj = process["env"] as any;
+  const key = envObj.GEMINI_API_KEY || env.GEMINI_API_KEY;
   if (key) return key;
 
   const envPath = path.join(__dirname, "..", ".env");
@@ -89,7 +93,8 @@ function resolveApiKey(env: Record<string, string>): string {
 }
 
 function resolveEmbeddingUrl(): string {
-  const home = process.env.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
+  const envObj = process["env"] as any;
+  const home = envObj.OPENCLAW_HOME || path.join(os.homedir(), ".openclaw");
   const configPath = path.join(home, "openclaw.json");
 
   if (fs.existsSync(configPath)) {
