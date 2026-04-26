@@ -254,7 +254,7 @@ function register(api: any): void {
         return messages.slice(-keepMessages);
       },
     });
-    log.info("[Memory Wiki Engine] Compaction provider registered");
+    ocLog.info("[Memory Wiki Engine] Compaction provider registered");
   }
 
   // -------------------------------------------------------------------
@@ -453,8 +453,8 @@ function register(api: any): void {
         const type = ctx.args?.trim() === "rem" ? "rem" : "light";
         const report =
           type === "rem"
-            ? await dreamRem(database, config, log)
-            : await dreamLight(database, config, log);
+            ? await dreamRem(database, config, ocLog)
+            : await dreamLight(database, config, ocLog);
 
         return {
           text: [
@@ -551,7 +551,7 @@ function register(api: any): void {
         const database = getDb();
         if (!database || !config) return { text: "Plugin not initialized" };
 
-        const result = await wikiIngest(api, database, config, log);
+        const result = await wikiIngest(api, database, config, ocLog);
 
         return {
           text: [
@@ -622,7 +622,7 @@ function register(api: any): void {
         const database = getDb();
         if (!database || !config) return { text: "Plugin not initialized" };
 
-        const result = wikiSync(database, config, log);
+        const result = wikiSync(database, config, ocLog);
 
         return {
           text: [
@@ -645,10 +645,10 @@ function register(api: any): void {
       // Eagerly init DB when the gateway starts (the primary runtime path)
       const database = getDb();
       if (!database) return;
-      log.info(
+      ocLog.info(
         `[Memory Wiki Engine] Activated — DB: ${config.dbPath}, Wiki: ${config.wikiPath}`
       );
-      scheduleDreams(config, database, log);
+      scheduleDreams(config, database, ocLog);
     });
   }
 
@@ -663,7 +663,7 @@ function register(api: any): void {
       if (db) {
         resetStatements();
         dbModule?.closeDatabase(db);
-        log.info("[Memory Wiki Engine] DB closed");
+        ocLog.info("[Memory Wiki Engine] DB closed");
       }
     });
   }
