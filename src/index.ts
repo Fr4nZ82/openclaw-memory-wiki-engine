@@ -57,6 +57,18 @@ let config: PluginConfig | null = null;
 let dreamTimer: ReturnType<typeof setInterval> | null = null;
 let remTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * Lazy DB initializer. Opens the database on first access
+ * instead of eagerly during register(). This avoids the cost of
+ * loading better-sqlite3 + running DDL for every CLI command.
+ */
+function getDb(): Database.Database | null {
+  if (db) return db;
+  if (!config) return null;
+  db = initDatabase(config);
+  return db;
+}
+
 // ---------------------------------------------------------------------------
 // OpenClaw entry point
 // ---------------------------------------------------------------------------
@@ -76,14 +88,12 @@ function register(api: any): void {
   const userConfig = api.pluginConfig ?? api.getPluginConfig?.() ?? {};
   config = resolveConfig(userConfig);
 
-  // Initialize the database (creates tables if needed)
-  db = initDatabase(config);
+  // NOTE: Database is NOT opened here — it's lazy-initialized on first access
+  // via getDb(). This avoids the cost of loading better-sqlite3 + running DDL
+  // for lightweight CLI commands (hooks list, status, help, etc.).
 
   // Startup log
   const log = api.getLogger?.("memory-wiki-engine") ?? console;
-  log.info(
-    `[Memory Wiki Engine] Activated — DB: ${config.dbPath}, Wiki: ${config.wikiPath}`
-  );
 
   // -------------------------------------------------------------------
   // Hook: message_received — capture user messages
@@ -91,7 +101,8 @@ function register(api: any): void {
 
   if (api.on) {
     api.on("message_received", async (event: any) => {
-      if (!db || !config) return;
+      const database = getDb();
+      if (!database || !config) return;
 
       try {
         const message: IncomingMessage = {
@@ -106,7 +117,7 @@ function register(api: any): void {
         // Skip empty messages
         if (!message.text.trim()) return;
 
-        const stats = await processUserMessage(api, db, config, message);
+        const stats = await processUserMessage(api, database, config, message);
 
         if (stats.captured) {
           log.info(
@@ -129,7 +140,8 @@ function register(api: any): void {
     // -------------------------------------------------------------------
 
     api.on("message_sending", (event: any) => {
-      if (!db) return;
+      const database = getDb();
+      if (!database) return;
 
       try {
         const message: IncomingMessage = {
@@ -143,7 +155,7 @@ function register(api: any): void {
 
         if (!message.text.trim()) return;
 
-        processAssistantMessage(db, message, null);
+        processAssistantMessage(database, message, null);
       } catch (error) {
         log.warn("[Archive] Error archiving response:", error);
       }
@@ -154,7 +166,8 @@ function register(api: any): void {
     // -------------------------------------------------------------------
 
     api.on("before_prompt_build", async (event: any) => {
-      if (!db || !config) return;
+      const database = getDb();
+      if (!database || !config) return;
 
       try {
         const userQuery = event.lastUserMessage || event.text || "";
@@ -162,7 +175,7 @@ function register(api: any): void {
         const sessionId = event.sessionKey || "unknown";
 
         const recallCtx = await buildRecallContext(
-          db,
+          database,
           config,
           sessionId,
           userQuery,
@@ -229,12 +242,13 @@ function register(api: any): void {
         required: ["query"],
       },
       async execute(_toolCallId: string, params: Record<string, unknown>) {
-        if (!db || !config) return { content: [{ type: "text", text: "Memory not initialized" }] };
+        const database = getDb();
+        if (!database || !config) return { content: [{ type: "text", text: "Memory not initialized" }] };
 
         const query = params.query as string;
         const senderId = extractSenderId(undefined);
         const recallCtx = await buildRecallContext(
-          db,
+          database,
           config,
           "unknown",
           query,
@@ -272,14 +286,15 @@ function register(api: any): void {
         required: ["fact"],
       },
       async execute(_toolCallId: string, params: Record<string, unknown>) {
-        if (!db || !config) return { content: [{ type: "text", text: "Memory not initialized" }] };
+        const database = getDb();
+        if (!database || !config) return { content: [{ type: "text", text: "Memory not initialized" }] };
 
         const fact = params.fact as string;
         const factType = (params.fact_type as string) || "fact";
         const senderId = "manual";
 
         // Insert directly as capture (will be promoted by the dream)
-        db.prepare(
+        database.prepare(
           `INSERT INTO session_captures
             (session_id, message_text, fact_text, topics, sender_id,
              owner_type, owner_id, fact_type, is_internal, captured_at)
@@ -324,11 +339,12 @@ function register(api: any): void {
         required: ["query"],
       },
       execute(_toolCallId: string, params: Record<string, unknown>) {
-        if (!db) return { content: [{ type: "text", text: "Memory not initialized" }] };
+        const database = getDb();
+        if (!database) return { content: [{ type: "text", text: "Memory not initialized" }] };
 
         const query = params.query as string;
         const limit = (params.limit as number) ?? 10;
-        const results = searchArchive(db, query, limit);
+        const results = searchArchive(database, query, limit);
 
         if (results.length === 0) {
           return { content: [{ type: "text", text: "No results found in the archive." }] };
@@ -392,13 +408,14 @@ function register(api: any): void {
       acceptsArgs: true,
       requireAuth: false,
       handler: async (ctx: { args?: string }) => {
-        if (!db || !config) return { text: "Plugin not initialized" };
+        const database = getDb();
+        if (!database || !config) return { text: "Plugin not initialized" };
 
         const type = ctx.args?.trim() === "rem" ? "rem" : "light";
         const report =
           type === "rem"
-            ? await dreamRem(db, config, log)
-            : await dreamLight(db, config, log);
+            ? await dreamRem(database, config, log)
+            : await dreamLight(database, config, log);
 
         return {
           text: [
@@ -428,20 +445,21 @@ function register(api: any): void {
       acceptsArgs: false,
       requireAuth: false,
       handler: () => {
-        if (!db) return { text: "Plugin not initialized" };
+        const database = getDb();
+        if (!database) return { text: "Plugin not initialized" };
 
-        const facts = db
+        const facts = database
           .prepare("SELECT COUNT(*) as c FROM facts WHERE is_active = 1")
           .get() as { c: number };
-        const captures = db
+        const captures = database
           .prepare(
             "SELECT COUNT(*) as c FROM session_captures WHERE promoted = 0"
           )
           .get() as { c: number };
-        const archive = db
+        const archive = database
           .prepare("SELECT COUNT(*) as c FROM session_archive")
           .get() as { c: number };
-        const superseded = db
+        const superseded = database
           .prepare("SELECT COUNT(*) as c FROM facts WHERE is_active = 0")
           .get() as { c: number };
 
@@ -464,13 +482,14 @@ function register(api: any): void {
       acceptsArgs: true,
       requireAuth: false,
       handler: (ctx: { args?: string; sessionKey?: string }) => {
-        if (!db) return { text: "Plugin not initialized" };
+        const database = getDb();
+        if (!database) return { text: "Plugin not initialized" };
 
         const topic = ctx.args?.trim();
         if (!topic) return { text: "Usage: /set-topic <topic>" };
 
         // Insert a dummy capture with the forced topic
-        db.prepare(
+        database.prepare(
           `INSERT INTO session_captures
             (session_id, message_text, fact_text, topics, sender_id,
              owner_type, owner_id, fact_type, is_internal, captured_at, promoted)
@@ -490,9 +509,10 @@ function register(api: any): void {
       acceptsArgs: false,
       requireAuth: false,
       handler: async () => {
-        if (!db || !config) return { text: "Plugin not initialized" };
+        const database = getDb();
+        if (!database || !config) return { text: "Plugin not initialized" };
 
-        const result = await wikiIngest(api, db, config, log);
+        const result = await wikiIngest(api, database, config, log);
 
         return {
           text: [
@@ -518,9 +538,10 @@ function register(api: any): void {
       acceptsArgs: false,
       requireAuth: false,
       handler: () => {
-        if (!db || !config) return { text: "Plugin not initialized" };
+        const database = getDb();
+        if (!database || !config) return { text: "Plugin not initialized" };
 
-        const report = wikiLint(db, config);
+        const report = wikiLint(database, config);
 
         const lines = [
           "🔍 Wiki Lint Report",
@@ -559,9 +580,10 @@ function register(api: any): void {
       acceptsArgs: false,
       requireAuth: false,
       handler: () => {
-        if (!db || !config) return { text: "Plugin not initialized" };
+        const database = getDb();
+        if (!database || !config) return { text: "Plugin not initialized" };
 
-        const result = wikiSync(db, config, log);
+        const result = wikiSync(database, config, log);
 
         return {
           text: [
@@ -575,10 +597,21 @@ function register(api: any): void {
   }
 
   // -------------------------------------------------------------------
-  // Dream scheduling
+  // Dream scheduling — only when the gateway is running
   // -------------------------------------------------------------------
 
-  scheduleDreams(config, db, log);
+  if (api.on) {
+    api.on("gateway_start", () => {
+      if (!config) return;
+      // Eagerly init DB when the gateway starts (the primary runtime path)
+      const database = getDb();
+      if (!database) return;
+      log.info(
+        `[Memory Wiki Engine] Activated — DB: ${config.dbPath}, Wiki: ${config.wikiPath}`
+      );
+      scheduleDreams(config, database, log);
+    });
+  }
 
   // -------------------------------------------------------------------
   // Shutdown hook
@@ -620,6 +653,7 @@ function scheduleDreams(
       log.warn("[Dream] Error in scheduled light dream:", error);
     }
   }, intervalMs);
+  dreamTimer.unref();
 
   // REM dream — 1x/night
   scheduleNextRem(config, db, log);
@@ -660,6 +694,7 @@ function scheduleNextRem(
     // Reschedule for the next night
     scheduleNextRem(config, db, log);
   }, msUntilRem);
+  remTimer.unref();
 }
 
 // ---------------------------------------------------------------------------

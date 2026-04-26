@@ -71,6 +71,34 @@ openclaw config set plugins.slots.memory "openclaw-memory-wiki-engine"
 openclaw gateway restart
 ```
 
+### Recommended OpenClaw configuration
+
+The plugin registers a custom compaction provider (`wiki-engine-truncate`) that **truncates** conversation history to `keepTurns` messages instead of running an LLM summarization pass. To activate it and disable redundant native mechanisms:
+
+```bash
+# 1. Use the plugin's truncation provider instead of LLM-based summarization
+openclaw config set agents.defaults.compaction.provider wiki-engine-truncate
+
+# 2. Disable the pre-compaction memory flush (LLM turn that saves context — redundant with this plugin)
+openclaw config set agents.defaults.compaction.memoryFlush.enabled false
+
+# 3. Disable the session-memory hook (LLM-based slug generation on /new or /reset — redundant)
+openclaw hooks disable session-memory
+
+# 4. (Optional) Force compaction to trigger sooner on large context windows (e.g. Gemini 1M)
+# Default reserveTokens is ~16K, meaning compaction triggers at ~984K tokens — effectively never.
+# Setting 980000 triggers compaction at ~20K total context (~15 messages of history).
+openclaw config set agents.defaults.compaction.reserveTokens 980000
+
+# Apply changes
+openclaw gateway restart
+```
+
+> **Why?** Without these settings, OpenClaw runs 2 redundant LLM calls per session lifecycle:
+> a silent "memory flush" turn before each compaction, and a `session-memory` hook that
+> generates slug-based summaries on `/new`/`/reset`. Since this plugin already persists
+> all facts, captures, and wiki pages, those LLM calls are pure waste.
+
 ### User enrollment
 
 The plugin supports multi-user memory with group-based scoping. After installation, enroll your users and groups using the CLI tool:
