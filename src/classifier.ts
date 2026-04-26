@@ -250,7 +250,7 @@ export async function classifyMessage(
     // 5. Call the LLM via llm-task
     console.log(`[RUMORE] Calling callLlmTask...`);
     const response = await callLlmTask(api, prompt);
-    console.log(`[RUMORE] callLlmTask response: ${response.substring(0, 200)}`);
+    console.log(`[RUMORE] callLlmTask response: ${response.substring(0, 500)}`);
 
     // 6. Parse the response
     const result = parseClassification(response, message.sender_id);
