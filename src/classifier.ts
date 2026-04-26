@@ -410,19 +410,39 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
 
 /**
  * Resolves the Gemini API key from available sources.
+ *
+ * The SDK may return either a plain string or an object { apiKey: "..." }.
+ * We handle both cases and fall back to getApiKeyForModel if provider
+ * resolution fails.
  */
 async function resolveGeminiApiKey(api: any): Promise<string | null> {
-  // OpenClaw model auth (Gateway provides the key based on its configuration)
+  const log = api.getLogger?.("memory-wiki-engine") ?? console;
+
+  // 1. Try resolveApiKeyForProvider (provider-level resolution)
   if (api.runtime?.modelAuth?.resolveApiKeyForProvider) {
     try {
-      const key = await api.runtime.modelAuth.resolveApiKeyForProvider({
+      const result = await api.runtime.modelAuth.resolveApiKeyForProvider({
         provider: "google",
         cfg: api.config,
       });
-      if (key) return key;
+      const key = typeof result === "string" ? result : result?.apiKey;
+      if (key && typeof key === "string") return key;
     } catch (e) {
-      const log = api.getLogger?.("memory-wiki-engine") ?? console;
-      log.warn("Failed to resolve API key via gateway auth", e);
+      log.warn("[Classifier] resolveApiKeyForProvider failed, trying fallback:", e);
+    }
+  }
+
+  // 2. Fallback: getApiKeyForModel (model-level resolution)
+  if (api.runtime?.modelAuth?.getApiKeyForModel) {
+    try {
+      const result = await api.runtime.modelAuth.getApiKeyForModel({
+        model: "gemini-3-flash-preview",
+        cfg: api.config,
+      });
+      const key = typeof result === "string" ? result : result?.apiKey;
+      if (key && typeof key === "string") return key;
+    } catch (e) {
+      log.warn("[Classifier] getApiKeyForModel failed:", e);
     }
   }
 
