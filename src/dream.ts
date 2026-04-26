@@ -24,7 +24,7 @@ import * as path from "path";
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
 import type { SessionCapture, Fact } from "./db";
-import { generateFactId, topicsToJson, jsonToTopics } from "./db";
+import { generateFactId, topicsToJson, jsonToTopics } from "./utils";
 import {
   generateEmbedding,
   serializeEmbedding,

@@ -16,7 +16,7 @@
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
 import type { Fact, SessionCapture } from "./db";
-import { jsonToTopics } from "./db";
+import { jsonToTopics } from "./utils";
 import {
   generateEmbedding,
   cosineSimilarity,

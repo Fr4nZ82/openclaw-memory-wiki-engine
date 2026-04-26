@@ -349,7 +349,7 @@ function applySchema(db: Database.Database): void {
 }
 
 // ---------------------------------------------------------------------------
-// Utility helpers
+// Utility helpers — re-exported from utils.ts for backward compatibility
 // ---------------------------------------------------------------------------
 
 /**
@@ -360,31 +360,4 @@ export function closeDatabase(db: Database.Database): void {
   db.close();
 }
 
-/**
- * Generates a unique ID for a fact.
- * Format: f_<timestamp>_<random>
- */
-export function generateFactId(): string {
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).substring(2, 8);
-  return `f_${ts}_${rand}`;
-}
-
-/**
- * Converts a topics array to JSON string for DB storage.
- */
-export function topicsToJson(topics: string[]): string {
-  return JSON.stringify(topics);
-}
-
-/**
- * Converts a JSON topics string to array.
- */
-export function jsonToTopics(json: string): string[] {
-  try {
-    const parsed = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed : [parsed];
-  } catch {
-    return [json]; // fallback: treat as single topic
-  }
-}
+export { generateFactId, topicsToJson, jsonToTopics } from "./utils";

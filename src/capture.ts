@@ -23,7 +23,7 @@ import {
   classifyMessage,
   type ClassificationResult,
 } from "./classifier";
-import { topicsToJson } from "./db";
+import { topicsToJson } from "./utils";
 
 // ---------------------------------------------------------------------------
 // Types

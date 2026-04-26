@@ -31,7 +31,9 @@
 
 import type Database from "better-sqlite3";
 import { resolveConfig, type PluginConfig } from "./config";
-import { initDatabase, closeDatabase, topicsToJson } from "./db";
+import { topicsToJson } from "./utils";
+// NOTE: db.ts is NOT imported at the top level to avoid eagerly loading
+// the better-sqlite3 native addon. It's loaded dynamically inside getDb().
 import {
   processUserMessage,
   processAssistantMessage,
@@ -57,6 +59,9 @@ let config: PluginConfig | null = null;
 let dreamTimer: ReturnType<typeof setInterval> | null = null;
 let remTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
+let dbModule: typeof import("./db") | null = null;
+
 /**
  * Lazy DB initializer. Opens the database on first access
  * instead of eagerly during register(). This avoids the cost of
@@ -65,7 +70,11 @@ let remTimer: ReturnType<typeof setTimeout> | null = null;
 function getDb(): Database.Database | null {
   if (db) return db;
   if (!config) return null;
-  db = initDatabase(config);
+  // Dynamic require — loads better-sqlite3 only when actually needed
+  if (!dbModule) {
+    dbModule = require("./db");
+  }
+  db = dbModule!.initDatabase(config);
   return db;
 }
 
@@ -623,7 +632,7 @@ function register(api: any): void {
       if (remTimer) clearTimeout(remTimer);
       if (db) {
         resetStatements();
-        closeDatabase(db);
+        dbModule?.closeDatabase(db);
         log.info("[Memory Wiki Engine] DB closed");
       }
     });

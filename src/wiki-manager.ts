@@ -21,7 +21,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
-import { jsonToTopics } from "./db";
+import { jsonToTopics } from "./utils";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -187,7 +187,7 @@ async function processJsonIngest(
     return;
   }
 
-  const { generateFactId, topicsToJson } = await import("./db");
+  const { generateFactId, topicsToJson } = await import("./utils");
 
   for (const fact of facts) {
     if (!fact.text) continue;
