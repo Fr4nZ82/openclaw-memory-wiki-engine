@@ -117,6 +117,8 @@ function register(api: any): void {
       }
 
       try {
+        console.log(`[RUMORE] event keys: ${Object.keys(event).join(', ')}`)
+        console.log(`[RUMORE] event.sender_id=${event.sender_id}, event.senderId=${event.senderId}, event.senderName=${event.senderName}, event.sessionKey=${event.sessionKey}, event.userId=${event.userId}`);
         const message: IncomingMessage = {
           text: event.text || event.content || "",
           sender_id: extractSenderId(event.sessionKey),
