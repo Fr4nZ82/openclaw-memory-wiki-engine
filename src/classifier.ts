@@ -235,6 +235,8 @@ export async function classifyMessage(
     // 3b. Get all known users (for cross-user attribution)
     const knownUsers = getAllUsers(db);
 
+    console.log(`[RUMORE] Hook message_received fired: "${message.text.substring(0, 50)}" sender=${message.sender_id}`);
+
     // 4. Build the prompt
     const prompt = buildClassifierPrompt(
       windowMessages,
@@ -246,12 +248,17 @@ export async function classifyMessage(
     );
 
     // 5. Call the LLM via llm-task
+    console.log(`[RUMORE] Calling callLlmTask...`);
     const response = await callLlmTask(api, prompt);
+    console.log(`[RUMORE] callLlmTask response: ${response.substring(0, 200)}`);
 
     // 6. Parse the response
-    return parseClassification(response, message.sender_id);
+    const result = parseClassification(response, message.sender_id);
+    console.log(`[RUMORE] Classification result: memorable=${result.is_memorable}, topics=${JSON.stringify(result.topics)}, owner=${result.owner_id}`);
+    return result;
   } catch (error) {
     // Safe fallback: don't memorize on error
+    console.warn(`[RUMORE] Classification FAILED:`, error);
     const log = api.getLogger?.("memory-wiki-engine") ?? console;
     log.warn("[Classifier] Classification error, falling back to non-memorable:", error);
     return createFallbackResult(message.sender_id);
@@ -418,6 +425,10 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
 async function resolveGeminiApiKey(api: any): Promise<string | null> {
   const log = api.getLogger?.("memory-wiki-engine") ?? console;
 
+  console.log(`[RUMORE] resolveGeminiApiKey called. Has modelAuth: ${!!api.runtime?.modelAuth}`);
+  console.log(`[RUMORE] Has resolveApiKeyForProvider: ${!!api.runtime?.modelAuth?.resolveApiKeyForProvider}`);
+  console.log(`[RUMORE] Has getApiKeyForModel: ${!!api.runtime?.modelAuth?.getApiKeyForModel}`);
+
   // 1. Try resolveApiKeyForProvider (provider-level resolution)
   if (api.runtime?.modelAuth?.resolveApiKeyForProvider) {
     try {
@@ -425,9 +436,12 @@ async function resolveGeminiApiKey(api: any): Promise<string | null> {
         provider: "google",
         cfg: api.config,
       });
+      console.log(`[RUMORE] resolveApiKeyForProvider returned: type=${typeof result}, keys=${result ? Object.keys(result) : 'null'}`);
       const key = typeof result === "string" ? result : result?.apiKey;
+      console.log(`[RUMORE] Extracted key: ${key ? key.substring(0, 8) + '...' + key.substring(key.length - 4) : 'NULL'}`);
       if (key && typeof key === "string") return key;
     } catch (e) {
+      console.warn(`[RUMORE] resolveApiKeyForProvider THREW:`, e);
       log.warn("[Classifier] resolveApiKeyForProvider failed, trying fallback:", e);
     }
   }
@@ -439,13 +453,17 @@ async function resolveGeminiApiKey(api: any): Promise<string | null> {
         model: "gemini-3-flash-preview",
         cfg: api.config,
       });
+      console.log(`[RUMORE] getApiKeyForModel returned: type=${typeof result}, keys=${result ? Object.keys(result) : 'null'}`);
       const key = typeof result === "string" ? result : result?.apiKey;
+      console.log(`[RUMORE] Fallback key: ${key ? key.substring(0, 8) + '...' + key.substring(key.length - 4) : 'NULL'}`);
       if (key && typeof key === "string") return key;
     } catch (e) {
+      console.warn(`[RUMORE] getApiKeyForModel THREW:`, e);
       log.warn("[Classifier] getApiKeyForModel failed:", e);
     }
   }
 
+  console.warn(`[RUMORE] ALL key resolution methods failed — returning null`);
   return null;
 }
 

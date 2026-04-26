@@ -111,7 +111,10 @@ function register(api: any): void {
   if (api.on) {
     api.on("message_received", async (event: any) => {
       const database = getDb();
-      if (!database || !config) return;
+      if (!database || !config) {
+        console.log(`[RUMORE] Hook skipped: db=${!!database}, config=${!!config}`);
+        return;
+      }
 
       try {
         const message: IncomingMessage = {
@@ -126,7 +129,11 @@ function register(api: any): void {
         // Skip empty messages
         if (!message.text.trim()) return;
 
+        console.log(`[RUMORE] index.ts hook entry: "${message.text.substring(0, 50)}" sender=${message.sender_id}`);
+
         const stats = await processUserMessage(api, database, config, message);
+
+        console.log(`[RUMORE] index.ts hook result: captured=${stats.captured}, skipped=${stats.skipped_reason || 'none'}`);
 
         if (stats.captured) {
           log.info(
