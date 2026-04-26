@@ -118,12 +118,21 @@ function register(api: any): void {
 
       try {
         console.log(`[RUMORE] event keys: ${Object.keys(event).join(', ')}`)
-        console.log(`[RUMORE] event.sender_id=${event.sender_id}, event.senderId=${event.senderId}, event.senderName=${event.senderName}, event.sessionKey=${event.sessionKey}, event.userId=${event.userId}`);
+        console.log(`[RUMORE] event.from=${event.from}, event.metadata=${JSON.stringify(event.metadata || {})}`);
+
+        // SDK hook event shape (from Hooks docs):
+        //   from, content, timestamp, metadata { senderId, senderName, channelId, guildId }
+        const senderId = event.metadata?.senderId || event.from || "unknown";
+        const senderName = event.metadata?.senderName || event.from || "unknown";
+        const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || "unknown";
+
+        console.log(`[RUMORE] Resolved sender: id=${senderId}, name=${senderName}, session=${sessionKey}`);
+
         const message: IncomingMessage = {
-          text: event.text || event.content || "",
-          sender_id: extractSenderId(event.sessionKey),
-          sender_name: event.senderName || event.sender_id || "unknown",
-          session_id: event.sessionKey || "unknown",
+          text: event.content || event.text || "",
+          sender_id: senderId,
+          sender_name: senderName,
+          session_id: sessionKey,
           role: "user",
           timestamp: new Date().toISOString(),
         };
