@@ -1,3 +1,13 @@
+import * as fs from "fs";
+
+const RUMORE_LOG = "/tmp/classifier_debug.log";
+function rumore(msg: string) {
+  const ts = new Date().toISOString();
+  const line = `[${ts}] ${msg}\n`;
+  console.log(`[RUMORE] ${msg.substring(0, 120)}`);
+  try { fs.appendFileSync(RUMORE_LOG, line); } catch {}
+}
+
 /**
  * classifier.ts — Message classifier
  *
@@ -5,6 +15,7 @@
  * decide:
  *   - What it's about (topics)
  *   - Whether it's a task/appointment (is_task → skills handle it)
+ *   - Whether it's a technical message (is_internal)
  *   - Whether it's worth remembering (is_memorable)
  *   - What exactly to remember (fact_text)
  *   - Who the fact belongs to (owner attribution)
@@ -235,7 +246,12 @@ export async function classifyMessage(
     // 3b. Get all known users (for cross-user attribution)
     const knownUsers = getAllUsers(db);
 
-    console.log(`[RUMORE] Hook message_received fired: "${message.text.substring(0, 50)}" sender=${message.sender_id}`);
+    rumore(`classifyMessage: sender=${message.sender_id}, name=${message.sender_name}, session=${sessionId}`);
+    rumore(`classifyMessage: windowMessages=${windowMessages.length}, currentTopic=${currentTopic}, groups=${userGroups.length}`);
+    rumore(`classifyMessage: knownUsers=${JSON.stringify(knownUsers.map(u => ({ id: u.sender_id, canonical: u.canonical_name })))}`);
+
+    const currentUser = knownUsers.find((u) => u.sender_id === message.sender_id);
+    rumore(`classifyMessage: currentUser match=${currentUser ? currentUser.canonical_name : 'NOT FOUND (sender_id mismatch!)'}`);
 
     // 4. Build the prompt
     const prompt = buildClassifierPrompt(
@@ -247,14 +263,17 @@ export async function classifyMessage(
       message.timestamp
     );
 
+    rumore(`PROMPT (first 300 chars): ${prompt.substring(0, 300)}`);
+    rumore(`PROMPT (last 300 chars): ${prompt.substring(prompt.length - 300)}`);
+
     // 5. Call the LLM via llm-task
-    console.log(`[RUMORE] Calling callLlmTask...`);
+    rumore(`Calling callLlmTask...`);
     const response = await callLlmTask(api, prompt);
-    console.log(`[RUMORE] callLlmTask response: ${response.substring(0, 500)}`);
+    rumore(`FULL GEMINI RESPONSE:\n${response}`);
 
     // 6. Parse the response
     const result = parseClassification(response, message.sender_id);
-    console.log(`[RUMORE] Classification result: memorable=${result.is_memorable}, topics=${JSON.stringify(result.topics)}, owner=${result.owner_id}`);
+    rumore(`PARSED RESULT: ${JSON.stringify(result)}`);
     return result;
   } catch (error) {
     // Safe fallback: don't memorize on error
