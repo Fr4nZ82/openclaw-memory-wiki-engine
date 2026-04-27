@@ -222,70 +222,117 @@ function register(api: any): void {
       try {
         dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
 
-        // Extract the last REAL user message directly from event.messages.
-        // This is the ONLY reliable source — no cross-hook cache needed.
-        // On heartbeat/cron turns there is no user message → skip recall.
+        // ---------------------------------------------------------------
+        // Extract the last REAL user message from event.messages.
         //
-        // IMPORTANT: System-injected context (MEMORY.md, routing hints, prepended
-        // context from other plugins) may also appear with role="user" in the
-        // messages array. We must filter these out by checking for known system
-        // content prefixes. Real human messages are short and don't start with
-        // markdown headers like "## Operational rules" or "# MEMORY.md".
+        // OpenClaw wraps user messages in a "Conversation info" envelope:
+        //
+        //   Conversation info (untrusted metadata):
+        //   ```json
+        //   { "chat_id": "telegram:7776007798", ... }
+        //   ```
+        //
+        //   [actual user message text here]
+        //
+        // Other messages with role="user" are system-injected:
+        //   - "## Operational rules" / "# MEMORY.md" — plugin prepend context
+        //   - "A new session was started via /new or /reset" — session reset
+        //
+        // We must:
+        //   1. Find the last "Conversation info" message (= real user msg)
+        //   2. Parse out the user text (after the closing ```)
+        //   3. Extract sender_id from the JSON metadata block
+        // ---------------------------------------------------------------
         const messages: any[] = event.messages || [];
 
-        // Diagnostic: dump message structure (temporary — remove after debugging)
-        for (let i = 0; i < messages.length; i++) {
-          const msg = messages[i];
-          const rawContent = typeof msg.content === "string"
-            ? msg.content
-            : Array.isArray(msg.content)
-              ? msg.content.map((p: any) => p.type === "text" ? p.text : `[${p.type}]`).join(" ")
-              : String(msg.content ?? "");
-          const preview = rawContent.substring(0, 80).replace(/\n/g, "\\n");
-          const metaKeys = msg.metadata ? Object.keys(msg.metadata).join(",") : "none";
-          dlog(`  msg[${i}] role=${msg.role} from=${msg.from ?? "-"} meta=[${metaKeys}] content="${preview}..."`);
+        const CONV_INFO_PREFIX = "Conversation info (untrusted metadata):";
+
+        /**
+         * Parse the "Conversation info" envelope.
+         * Returns { userText, senderId } or null if parsing fails.
+         */
+        function parseConversationInfo(raw: string): { userText: string; senderId: string } | null {
+          // Find the closing ``` of the JSON block
+          // Format: "Conversation info...\n```json\n{...}\n```\n\n[user text]"
+          const closingFenceIdx = raw.indexOf("\n```\n", raw.indexOf("```json"));
+          if (closingFenceIdx === -1) {
+            // Alternative: try ``` at end of line without trailing \n
+            const altIdx = raw.indexOf("\n```", raw.indexOf("```json") + 7);
+            if (altIdx === -1) return null;
+            const userText = raw.substring(altIdx + 4).trim();
+            return { userText, senderId: extractSenderFromConvInfo(raw) };
+          }
+
+          const userText = raw.substring(closingFenceIdx + 4).trim(); // skip "\n```\n"
+          const senderId = extractSenderFromConvInfo(raw);
+          return { userText, senderId };
         }
 
-        // System content prefixes to skip — these are injected by plugins, not real user messages
-        const SYSTEM_PREFIXES = [
-          "## Operational rules",
-          "# MEMORY.md",
-          "Conversation info (untrusted metadata)",
-          "## Memory context",
-          "## Routing hints",
-        ];
-
-        function isSystemInjectedContent(content: string): boolean {
-          const trimmed = content.trimStart();
-          return SYSTEM_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+        /**
+         * Extract sender ID from the "Conversation info" JSON block.
+         * Looks for "chat_id": "telegram:NNNNN" pattern.
+         */
+        function extractSenderFromConvInfo(raw: string): string {
+          // Try to extract chat_id from JSON
+          const chatIdMatch = raw.match(/"chat_id"\s*:\s*"(?:telegram:|discord:)(\d+)"/);
+          if (chatIdMatch) return chatIdMatch[1];
+          // Fallback: try sender_id
+          const senderMatch = raw.match(/"sender_id"\s*:\s*"(\d+)"/);
+          if (senderMatch) return senderMatch[1];
+          return "";
         }
 
         let userQuery = "";
-        let lastUserMsg: any = null;
+        let extractedSenderId = "";
+        let foundMsgIdx = -1;
+
         for (let i = messages.length - 1; i >= 0; i--) {
           const msg = messages[i];
-          if (msg.role === "user") {
-            // msg.content can be a string or array of content parts
-            const raw = typeof msg.content === "string"
-              ? msg.content
-              : Array.isArray(msg.content)
-                ? msg.content
-                    .filter((p: any) => p.type === "text")
-                    .map((p: any) => p.text)
-                    .join(" ")
-                : "";
-            const trimmed = raw.trim();
+          if (msg.role !== "user") continue;
 
-            // Skip system-injected content
-            if (isSystemInjectedContent(trimmed)) {
-              dlog(`  SKIPPING msg[${i}]: system-injected content (prefix match)`);
+          const raw = typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content
+                  .filter((p: any) => p.type === "text")
+                  .map((p: any) => p.text)
+                  .join(" ")
+              : "";
+          const trimmed = raw.trim();
+
+          // Is this a "Conversation info" wrapped message?
+          if (trimmed.startsWith(CONV_INFO_PREFIX)) {
+            const parsed = parseConversationInfo(trimmed);
+            if (parsed && parsed.userText) {
+              userQuery = parsed.userText;
+              extractedSenderId = parsed.senderId;
+              foundMsgIdx = i;
+              dlog(`  FOUND real user message in msg[${i}]: "${userQuery.substring(0, 60)}..." sender=${extractedSenderId}`);
+              break;
+            } else {
+              dlog(`  msg[${i}]: Conversation info but could not parse user text — skipping`);
               continue;
             }
-
-            userQuery = trimmed;
-            lastUserMsg = msg;
-            break;
           }
+
+          // Skip known system-injected content
+          if (
+            trimmed.startsWith("## Operational rules") ||
+            trimmed.startsWith("# MEMORY.MD") ||
+            trimmed.startsWith("# MEMORY.md") ||
+            trimmed.startsWith("## Memory context") ||
+            trimmed.startsWith("## Routing hints") ||
+            trimmed.startsWith("A new session was started")
+          ) {
+            dlog(`  SKIPPING msg[${i}]: system-injected content`);
+            continue;
+          }
+
+          // Fallback: plain user message (no wrapper — future SDK versions?)
+          userQuery = trimmed;
+          foundMsgIdx = i;
+          dlog(`  FOUND plain user message in msg[${i}]: "${userQuery.substring(0, 60)}..."`);
+          break;
         }
 
         if (!userQuery) {
@@ -293,29 +340,20 @@ function register(api: any): void {
           return;
         }
 
-        // Extract sender identity directly from the message and event context.
-        // No cross-hook cache — fully stateless (ADR-013).
-        //
-        // Fallback chain:
-        //   1. lastUserMsg.metadata.senderId  (ideal — if OpenClaw populates it)
-        //   2. lastUserMsg.from               (some SDK versions)
-        //   3. event.metadata?.senderId       (event-level)
-        //   4. Parse from event.sessionKey    (e.g. "agent:main:telegram:direct:7776007798")
-        //   5. "unknown"
-        let senderId = lastUserMsg?.metadata?.senderId
-          || lastUserMsg?.from
+        // Resolve sender identity.
+        // Priority: extracted from Conversation info > message metadata > event metadata > sessionKey parse
+        let senderId = extractedSenderId
+          || messages[foundMsgIdx]?.metadata?.senderId
+          || messages[foundMsgIdx]?.from
           || event.metadata?.senderId
           || "";
 
-        // Try to extract sender from sessionKey if all else failed
         const sessionId = event.sessionKey
           || event.metadata?.sessionKey
           || event.metadata?.channelId
           || "unknown";
 
         if (!senderId && sessionId !== "unknown") {
-          // sessionKey format: "agent:main:telegram:direct:7776007798"
-          // or simpler: "telegram:7776007798"
           const parts = sessionId.split(":");
           const lastPart = parts[parts.length - 1];
           if (lastPart && /^\d+$/.test(lastPart)) {
