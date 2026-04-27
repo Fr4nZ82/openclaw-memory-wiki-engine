@@ -63,9 +63,13 @@ let dreamTimer: ReturnType<typeof setInterval> | null = null;
 let remTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Cached from message_received — used by before_prompt_build which lacks sender info
+// The cache is consumed (cleared) after each before_prompt_build to prevent stale
+// recall injection on heartbeat/cron turns that have no new user message.
 let lastReceivedSenderId: string | null = null;
 let lastReceivedSessionId: string | null = null;
 let lastReceivedQuery: string | null = null;
+let lastReceivedAt: number = 0;
+const RECALL_CACHE_TTL_MS = 60_000; // 60s — cache is stale after this
 
 // Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
 let dbModule: typeof import("./db") | null = null;
@@ -150,6 +154,7 @@ function register(api: any): void {
         lastReceivedSenderId = senderId;
         lastReceivedSessionId = sessionKey;
         lastReceivedQuery = messageText;
+        lastReceivedAt = Date.now();
 
         const message: IncomingMessage = {
           text: messageText,
@@ -233,10 +238,28 @@ function register(api: any): void {
         // Use the cached query from message_received (the real user text).
         // The messages array in this event contains system metadata prepended
         // to the first user message, which pollutes BM25/vector search.
-        const userQuery = lastReceivedQuery || "";
+        //
+        // IMPORTANT: If the cache is stale (no recent message_received), this
+        // is a heartbeat/cron/system turn — skip recall to avoid injecting
+        // context from old messages (see: stale-recall-cache bug 2026-04-27).
+        const cacheAgeMs = Date.now() - lastReceivedAt;
+        if (!lastReceivedQuery || cacheAgeMs > RECALL_CACHE_TTL_MS) {
+          dlog(`before_prompt_build: SKIPPED recall — cache stale (age=${Math.round(cacheAgeMs / 1000)}s, query=${lastReceivedQuery ? '"' + lastReceivedQuery.substring(0, 30) + '..."' : 'null'})`);
+          // Clear stale cache
+          lastReceivedQuery = null;
+          lastReceivedSenderId = null;
+          lastReceivedSessionId = null;
+          return;
+        }
 
+        const userQuery = lastReceivedQuery;
         const senderId = lastReceivedSenderId || "unknown";
         const sessionId = lastReceivedSessionId || "unknown";
+
+        // Consume the cache — prevents re-use on subsequent heartbeat/cron turns
+        lastReceivedQuery = null;
+        lastReceivedSenderId = null;
+        lastReceivedSessionId = null;
 
         dlog(`before_prompt_build: query="${userQuery.substring(0, 50)}", sender=${senderId}, session=${sessionId}`);
 
