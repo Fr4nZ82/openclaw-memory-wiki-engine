@@ -62,14 +62,6 @@ let config: PluginConfig | null = null;
 let dreamTimer: ReturnType<typeof setInterval> | null = null;
 let remTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Cached from message_received — used by before_prompt_build which lacks sender info
-// The cache is consumed (cleared) after each before_prompt_build to prevent stale
-// recall injection on heartbeat/cron turns that have no new user message.
-let lastReceivedSenderId: string | null = null;
-let lastReceivedSessionId: string | null = null;
-let lastReceivedQuery: string | null = null;
-let lastReceivedAt: number = 0;
-const RECALL_CACHE_TTL_MS = 60_000; // 60s — cache is stale after this
 
 // Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
 let dbModule: typeof import("./db") | null = null;
@@ -150,11 +142,6 @@ function register(api: any): void {
 
         const messageText = event.content || event.text || "";
 
-        // Cache for before_prompt_build (which lacks sender/query info in its event schema)
-        lastReceivedSenderId = senderId;
-        lastReceivedSessionId = sessionKey;
-        lastReceivedQuery = messageText;
-        lastReceivedAt = Date.now();
 
         const message: IncomingMessage = {
           text: messageText,
@@ -235,31 +222,45 @@ function register(api: any): void {
       try {
         dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
 
-        // Use the cached query from message_received (the real user text).
-        // The messages array in this event contains system metadata prepended
-        // to the first user message, which pollutes BM25/vector search.
-        //
-        // IMPORTANT: If the cache is stale (no recent message_received), this
-        // is a heartbeat/cron/system turn — skip recall to avoid injecting
-        // context from old messages (see: stale-recall-cache bug 2026-04-27).
-        const cacheAgeMs = Date.now() - lastReceivedAt;
-        if (!lastReceivedQuery || cacheAgeMs > RECALL_CACHE_TTL_MS) {
-          dlog(`before_prompt_build: SKIPPED recall — cache stale (age=${Math.round(cacheAgeMs / 1000)}s, query=${lastReceivedQuery ? '"' + lastReceivedQuery.substring(0, 30) + '..."' : 'null'})`);
-          // Clear stale cache
-          lastReceivedQuery = null;
-          lastReceivedSenderId = null;
-          lastReceivedSessionId = null;
+        // Extract the last user message directly from event.messages.
+        // This is the ONLY reliable source — no cross-hook cache needed.
+        // On heartbeat/cron turns there is no user message → skip recall.
+        const messages: any[] = event.messages || [];
+        let userQuery = "";
+        let lastUserMsg: any = null;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+          if (msg.role === "user") {
+            // msg.content can be a string or array of content parts
+            const raw = typeof msg.content === "string"
+              ? msg.content
+              : Array.isArray(msg.content)
+                ? msg.content
+                    .filter((p: any) => p.type === "text")
+                    .map((p: any) => p.text)
+                    .join(" ")
+                : "";
+            userQuery = raw.trim();
+            lastUserMsg = msg;
+            break;
+          }
+        }
+
+        if (!userQuery) {
+          dlog(`before_prompt_build: SKIPPED recall — no user message in turn (heartbeat/cron/system)`);
           return;
         }
 
-        const userQuery = lastReceivedQuery;
-        const senderId = lastReceivedSenderId || "unknown";
-        const sessionId = lastReceivedSessionId || "unknown";
-
-        // Consume the cache — prevents re-use on subsequent heartbeat/cron turns
-        lastReceivedQuery = null;
-        lastReceivedSenderId = null;
-        lastReceivedSessionId = null;
+        // Extract sender identity directly from the message and event context.
+        // No cross-hook cache — fully stateless (ADR-013).
+        const senderId = lastUserMsg?.metadata?.senderId
+          || lastUserMsg?.from
+          || event.metadata?.senderId
+          || "unknown";
+        const sessionId = event.sessionKey
+          || event.metadata?.sessionKey
+          || event.metadata?.channelId
+          || "unknown";
 
         dlog(`before_prompt_build: query="${userQuery.substring(0, 50)}", sender=${senderId}, session=${sessionId}`);
 
@@ -271,12 +272,9 @@ function register(api: any): void {
           senderId
         );
 
-        // Inject into system prompt
-        if (event.addSystemContext) {
-          event.addSystemContext(recallCtx.systemContext);
-        }
-
+        // Return context for OpenClaw to inject (standard SDK pattern — ADR-013)
         dlog(`[Recall] ${recallCtx.estimatedTokens} tokens injected — wiki: ${recallCtx.details.wikiPagesMatched}, facts: ${recallCtx.details.factsMatched}, captures: ${recallCtx.details.capturesFound}, vector: ${recallCtx.details.vectorSearchUsed}`);
+        return { prependContext: recallCtx.systemContext };
       } catch (error) {
         ocLog.warn("[Recall] Error injecting context:", error);
         dlog(`[Recall] UNHANDLED ERROR: ${error}`);
