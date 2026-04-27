@@ -32,7 +32,7 @@
 import type Database from "better-sqlite3";
 import { resolveConfig, type PluginConfig } from "./config";
 import { topicsToJson } from "./utils";
-import { dbg, resetDebugLog } from "./debug";
+import { dbg, resetDebugLog, setDebugEnabled } from "./debug";
 // NOTE: db.ts is NOT imported at the top level to avoid eagerly loading
 // the better-sqlite3 native addon. It's loaded dynamically inside getDb().
 import {
@@ -104,6 +104,11 @@ function register(api: any): void {
   // Read plugin config (from openclaw.json) and merge with defaults
   const userConfig = api.pluginConfig ?? api.getPluginConfig?.() ?? {};
   config = resolveConfig(userConfig);
+
+  // Debug toggle: plugin config takes precedence over MWE_DEBUG env var
+  if (typeof userConfig.debug === "boolean") {
+    setDebugEnabled(userConfig.debug);
+  }
 
   // NOTE: Database is NOT opened here — it's lazy-initialized on first access
   // via getDb(). This avoids the cost of loading better-sqlite3 + running DDL
@@ -788,8 +793,9 @@ export default {
     type: "object",
     additionalProperties: false,
     properties: {
-      ollamaUrl: { type: "string" },
+      embeddingUrl: { type: "string" },
       embeddingModel: { type: "string" },
+      debug: { type: "boolean" },
     },
   },
   register,
