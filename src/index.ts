@@ -65,6 +65,7 @@ let remTimer: ReturnType<typeof setTimeout> | null = null;
 // Cached from message_received — used by before_prompt_build which lacks sender info
 let lastReceivedSenderId: string | null = null;
 let lastReceivedSessionId: string | null = null;
+let lastReceivedQuery: string | null = null;
 
 // Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
 let dbModule: typeof import("./db") | null = null;
@@ -133,16 +134,20 @@ function register(api: any): void {
         //   from, content, timestamp, metadata { senderId, senderName, channelId, guildId }
         const senderId = event.metadata?.senderId || event.from || "unknown";
         const senderName = event.metadata?.senderName || event.from || "unknown";
-        const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || "unknown";
+        // Session key: prefer channelId, fall back to "from" field (e.g. "telegram:7776007798")
+        const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || event.from || "unknown";
 
         dlog(`Resolved sender: id=${senderId}, name=${senderName}, session=${sessionKey}`);
 
-        // Cache for before_prompt_build (which lacks sender info in its event schema)
+        const messageText = event.content || event.text || "";
+
+        // Cache for before_prompt_build (which lacks sender/query info in its event schema)
         lastReceivedSenderId = senderId;
         lastReceivedSessionId = sessionKey;
+        lastReceivedQuery = messageText;
 
         const message: IncomingMessage = {
-          text: event.content || event.text || "",
+          text: messageText,
           sender_id: senderId,
           sender_name: senderName,
           session_id: sessionKey,
@@ -220,20 +225,11 @@ function register(api: any): void {
       try {
         dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
 
-        // This hook has a different schema: { prompt, messages }
-        // Extract sender and query from the messages array
-        const messages: any[] = event.messages || [];
-        const lastUserMsg = [...messages].reverse().find(
-          (m: any) => m.role === "user"
-        );
+        // Use the cached query from message_received (the real user text).
+        // The messages array in this event contains system metadata prepended
+        // to the first user message, which pollutes BM25/vector search.
+        const userQuery = lastReceivedQuery || "";
 
-        const userQuery = lastUserMsg?.content
-          ? (typeof lastUserMsg.content === "string"
-              ? lastUserMsg.content
-              : lastUserMsg.content?.[0]?.text || "")
-          : "";
-
-        // Try to get sender from the last message_received we cached
         const senderId = lastReceivedSenderId || "unknown";
         const sessionId = lastReceivedSessionId || "unknown";
 
