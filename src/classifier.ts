@@ -487,7 +487,7 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
       generationConfig: {
         responseMimeType: "application/json",
         temperature: 0.1,
-        maxOutputTokens: 512,
+        maxOutputTokens: 16384,
       },
     }),
     signal: AbortSignal.timeout(15000),
@@ -499,8 +499,14 @@ async function callLlmTask(api: any, prompt: string): Promise<string> {
   }
 
   const data = await response.json() as any;
+  const finishReason = data?.candidates?.[0]?.finishReason;
   const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  log(`Gemini finishReason=${finishReason}, content length=${content?.length || 0}`);
+  if (finishReason === "MAX_TOKENS") {
+    log(`WARNING: Gemini hit MAX_TOKENS — response truncated!`);
+  }
   if (!content) {
+    log(`Gemini raw response: ${JSON.stringify(data).substring(0, 500)}`);
     throw new Error("Empty response from Gemini");
   }
 
