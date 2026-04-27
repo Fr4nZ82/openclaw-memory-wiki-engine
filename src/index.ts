@@ -245,59 +245,51 @@ function register(api: any): void {
         // ---------------------------------------------------------------
         const messages: any[] = event.messages || [];
 
-        /**
-         * Detect OpenClaw message envelopes.
-         * OpenClaw wraps user messages in various "(untrusted metadata):" formats:
-         *   - "Conversation info (untrusted metadata):"
-         *   - "Sender (untrusted metadata):"
-         *   - possibly others in future SDK versions
-         * All share the pattern: header + ```json block + user text after closing ```.
-         */
-        function isWrappedMessage(content: string): boolean {
-          return content.includes("(untrusted metadata):") && content.includes("```json");
+        // ---- Envelope helpers ----
+
+        /** Check if a text part is an OpenClaw metadata envelope */
+        function isEnvelopePart(text: string): boolean {
+          return text.includes("(untrusted metadata):") && text.includes("```json");
         }
 
-        /**
-         * Parse an OpenClaw message envelope (any format).
-         * Returns { userText, senderId } or null if parsing fails.
-         */
-        function parseWrappedMessage(raw: string): { userText: string; senderId: string } | null {
-          const jsonStart = raw.indexOf("```json");
-          if (jsonStart === -1) return null;
-
-          // Find the closing ``` after the json block
-          // Try "\n```\n" first (most common), then "\n```" at EOF
-          let closingIdx = raw.indexOf("\n```\n", jsonStart + 7);
-          let skipLen = 4; // length of "\n```\n"
-          if (closingIdx === -1) {
-            closingIdx = raw.indexOf("\n```", jsonStart + 7);
-            skipLen = 4; // "\n```" (no trailing \n, but trim handles it)
-          }
-          if (closingIdx === -1) return null;
-
-          const userText = raw.substring(closingIdx + skipLen).trim();
-          const senderId = extractSenderFromEnvelope(raw);
-
-          dlog(`  parseWrappedMessage: userText="${userText.substring(0, 60)}...", senderId=${senderId}`);
-          return { userText, senderId };
+        /** Check if a text part is system-injected (not user text) */
+        function isSystemContent(text: string): boolean {
+          return (
+            text.startsWith("## Operational rules") ||
+            text.startsWith("# MEMORY.MD") ||
+            text.startsWith("# MEMORY.md") ||
+            text.startsWith("## Memory context") ||
+            text.startsWith("## Routing hints") ||
+            text.startsWith("A new session was started")
+          );
         }
 
-        /**
-         * Extract sender ID from the JSON metadata block inside any OpenClaw envelope.
-         * Tries multiple field names used across different envelope formats.
-         */
+        /** Extract sender ID from an envelope's JSON block */
         function extractSenderFromEnvelope(raw: string): string {
-          // chat_id: "telegram:7776007798" → extract 7776007798
           const chatIdMatch = raw.match(/"chat_id"\s*:\s*"(?:telegram:|discord:)(\d+)"/);
           if (chatIdMatch) return chatIdMatch[1];
-          // sender_id: "7776007798"
           const senderMatch = raw.match(/"sender_id"\s*:\s*"(\d+)"/);
           if (senderMatch) return senderMatch[1];
-          // user_id: "7776007798"
           const userIdMatch = raw.match(/"user_id"\s*:\s*"(\d+)"/);
           if (userIdMatch) return userIdMatch[1];
           return "";
         }
+
+        /** Parse an envelope part: extract user text after closing ``` and sender ID */
+        function parseEnvelopeText(raw: string): { userText: string; senderId: string } {
+          const senderId = extractSenderFromEnvelope(raw);
+          const jsonStart = raw.indexOf("```json");
+          if (jsonStart === -1) return { userText: "", senderId };
+
+          let closingIdx = raw.indexOf("\n```\n", jsonStart + 7);
+          if (closingIdx === -1) closingIdx = raw.indexOf("\n```", jsonStart + 7);
+          if (closingIdx === -1) return { userText: "", senderId };
+
+          const afterFence = raw.substring(closingIdx + 4).trim();
+          return { userText: afterFence, senderId };
+        }
+
+        // ---- Main extraction loop ----
 
         let userQuery = "";
         let extractedSenderId = "";
@@ -307,49 +299,103 @@ function register(api: any): void {
           const msg = messages[i];
           if (msg.role !== "user") continue;
 
-          const raw = typeof msg.content === "string"
-            ? msg.content
-            : Array.isArray(msg.content)
-              ? msg.content
-                  .filter((p: any) => p.type === "text")
-                  .map((p: any) => p.text)
-                  .join(" ")
-              : "";
-          const trimmed = raw.trim();
-
-          // Is this an OpenClaw-wrapped message (any envelope format)?
-          if (isWrappedMessage(trimmed)) {
-            const parsed = parseWrappedMessage(trimmed);
-            if (parsed && parsed.userText) {
-              userQuery = parsed.userText;
-              extractedSenderId = parsed.senderId;
-              foundMsgIdx = i;
-              dlog(`  FOUND real user message in msg[${i}]: "${userQuery.substring(0, 60)}..." sender=${extractedSenderId}`);
-              break;
+          // ---- Diagnostic dump for the last 3 user messages ----
+          if (foundMsgIdx === -1) { // only dump while searching
+            const contentType = typeof msg.content === "string" ? "string"
+              : Array.isArray(msg.content) ? `array[${msg.content.length}]`
+              : typeof msg.content;
+            if (Array.isArray(msg.content)) {
+              dlog(`  msg[${i}] role=user contentType=${contentType}:`);
+              for (let p = 0; p < msg.content.length; p++) {
+                const part = msg.content[p];
+                const partText = part.type === "text" ? part.text : `[${part.type}]`;
+                const preview = (typeof partText === "string" ? partText : String(partText))
+                  .substring(0, 100).replace(/\n/g, "\\n");
+                dlog(`    part[${p}] type=${part.type}: "${preview}..."`);
+              }
             } else {
-              dlog(`  msg[${i}]: wrapped envelope but empty user text — skipping`);
+              const preview = String(msg.content ?? "").substring(0, 100).replace(/\n/g, "\\n");
+              dlog(`  msg[${i}] role=user contentType=${contentType}: "${preview}..."`);
+            }
+          }
+
+          // ---- Process content parts ----
+          //
+          // OpenClaw sends user messages as multi-part content arrays:
+          //   part[0]: "Conversation info (untrusted metadata): ```json {...} ```"
+          //   part[1]: "Sender (untrusted metadata): ```json {...} ```"
+          //   part[2]: "ciao"  <-- the REAL user text
+          //
+          // We must process each part independently, not join them.
+
+          if (Array.isArray(msg.content)) {
+            const textParts: string[] = [];
+            let partSenderId = "";
+
+            for (const part of msg.content) {
+              if (part.type !== "text" || !part.text) continue;
+              const text = part.text.trim();
+
+              if (isEnvelopePart(text)) {
+                // Extract sender from envelope metadata
+                const parsed = parseEnvelopeText(text);
+                if (parsed.senderId && !partSenderId) partSenderId = parsed.senderId;
+                // If the envelope has trailing text after the fence, include it
+                if (parsed.userText && !isEnvelopePart(parsed.userText) && !isSystemContent(parsed.userText)) {
+                  textParts.push(parsed.userText);
+                }
+              } else if (isSystemContent(text)) {
+                // Skip system-injected content
+                continue;
+              } else if (text.length > 0) {
+                // This is a real user text part
+                textParts.push(text);
+              }
+            }
+
+            const combinedText = textParts.join(" ").trim();
+            if (combinedText) {
+              userQuery = combinedText;
+              extractedSenderId = partSenderId;
+              foundMsgIdx = i;
+              dlog(`  FOUND real user message in msg[${i}] (multi-part): "${userQuery.substring(0, 60)}..." sender=${extractedSenderId}`);
+              break;
+            } else if (partSenderId) {
+              // Envelope found but no user text — skip (metadata-only message)
+              dlog(`  msg[${i}]: envelope with sender=${partSenderId} but no user text — skipping`);
               continue;
             }
           }
 
-          // Skip known system-injected content
-          if (
-            trimmed.startsWith("## Operational rules") ||
-            trimmed.startsWith("# MEMORY.MD") ||
-            trimmed.startsWith("# MEMORY.md") ||
-            trimmed.startsWith("## Memory context") ||
-            trimmed.startsWith("## Routing hints") ||
-            trimmed.startsWith("A new session was started")
-          ) {
-            dlog(`  SKIPPING msg[${i}]: system-injected content`);
-            continue;
-          }
+          // ---- String content fallback ----
+          if (typeof msg.content === "string") {
+            const trimmed = msg.content.trim();
 
-          // Fallback: plain user message (no wrapper — future SDK versions?)
-          userQuery = trimmed;
-          foundMsgIdx = i;
-          dlog(`  FOUND plain user message in msg[${i}]: "${userQuery.substring(0, 60)}..."`);
-          break;
+            if (isEnvelopePart(trimmed)) {
+              const parsed = parseEnvelopeText(trimmed);
+              if (parsed.userText && !isEnvelopePart(parsed.userText) && !isSystemContent(parsed.userText)) {
+                userQuery = parsed.userText;
+                extractedSenderId = parsed.senderId;
+                foundMsgIdx = i;
+                dlog(`  FOUND real user message in msg[${i}] (string+envelope): "${userQuery.substring(0, 60)}..." sender=${extractedSenderId}`);
+                break;
+              } else {
+                dlog(`  msg[${i}]: string envelope but no user text — skipping`);
+                continue;
+              }
+            }
+
+            if (isSystemContent(trimmed)) {
+              dlog(`  SKIPPING msg[${i}]: system-injected content`);
+              continue;
+            }
+
+            // Plain user message
+            userQuery = trimmed;
+            foundMsgIdx = i;
+            dlog(`  FOUND plain user message in msg[${i}]: "${userQuery.substring(0, 60)}..."`);
+            break;
+          }
         }
 
         if (!userQuery) {
