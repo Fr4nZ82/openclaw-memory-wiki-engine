@@ -222,10 +222,44 @@ function register(api: any): void {
       try {
         dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
 
-        // Extract the last user message directly from event.messages.
+        // Extract the last REAL user message directly from event.messages.
         // This is the ONLY reliable source — no cross-hook cache needed.
         // On heartbeat/cron turns there is no user message → skip recall.
+        //
+        // IMPORTANT: System-injected context (MEMORY.md, routing hints, prepended
+        // context from other plugins) may also appear with role="user" in the
+        // messages array. We must filter these out by checking for known system
+        // content prefixes. Real human messages are short and don't start with
+        // markdown headers like "## Operational rules" or "# MEMORY.md".
         const messages: any[] = event.messages || [];
+
+        // Diagnostic: dump message structure (temporary — remove after debugging)
+        for (let i = 0; i < messages.length; i++) {
+          const msg = messages[i];
+          const rawContent = typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content.map((p: any) => p.type === "text" ? p.text : `[${p.type}]`).join(" ")
+              : String(msg.content ?? "");
+          const preview = rawContent.substring(0, 80).replace(/\n/g, "\\n");
+          const metaKeys = msg.metadata ? Object.keys(msg.metadata).join(",") : "none";
+          dlog(`  msg[${i}] role=${msg.role} from=${msg.from ?? "-"} meta=[${metaKeys}] content="${preview}..."`);
+        }
+
+        // System content prefixes to skip — these are injected by plugins, not real user messages
+        const SYSTEM_PREFIXES = [
+          "## Operational rules",
+          "# MEMORY.md",
+          "Conversation info (untrusted metadata)",
+          "## Memory context",
+          "## Routing hints",
+        ];
+
+        function isSystemInjectedContent(content: string): boolean {
+          const trimmed = content.trimStart();
+          return SYSTEM_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+        }
+
         let userQuery = "";
         let lastUserMsg: any = null;
         for (let i = messages.length - 1; i >= 0; i--) {
@@ -240,27 +274,56 @@ function register(api: any): void {
                     .map((p: any) => p.text)
                     .join(" ")
                 : "";
-            userQuery = raw.trim();
+            const trimmed = raw.trim();
+
+            // Skip system-injected content
+            if (isSystemInjectedContent(trimmed)) {
+              dlog(`  SKIPPING msg[${i}]: system-injected content (prefix match)`);
+              continue;
+            }
+
+            userQuery = trimmed;
             lastUserMsg = msg;
             break;
           }
         }
 
         if (!userQuery) {
-          dlog(`before_prompt_build: SKIPPED recall — no user message in turn (heartbeat/cron/system)`);
+          dlog(`before_prompt_build: SKIPPED recall — no real user message in turn (heartbeat/cron/system)`);
           return;
         }
 
         // Extract sender identity directly from the message and event context.
         // No cross-hook cache — fully stateless (ADR-013).
-        const senderId = lastUserMsg?.metadata?.senderId
+        //
+        // Fallback chain:
+        //   1. lastUserMsg.metadata.senderId  (ideal — if OpenClaw populates it)
+        //   2. lastUserMsg.from               (some SDK versions)
+        //   3. event.metadata?.senderId       (event-level)
+        //   4. Parse from event.sessionKey    (e.g. "agent:main:telegram:direct:7776007798")
+        //   5. "unknown"
+        let senderId = lastUserMsg?.metadata?.senderId
           || lastUserMsg?.from
           || event.metadata?.senderId
-          || "unknown";
+          || "";
+
+        // Try to extract sender from sessionKey if all else failed
         const sessionId = event.sessionKey
           || event.metadata?.sessionKey
           || event.metadata?.channelId
           || "unknown";
+
+        if (!senderId && sessionId !== "unknown") {
+          // sessionKey format: "agent:main:telegram:direct:7776007798"
+          // or simpler: "telegram:7776007798"
+          const parts = sessionId.split(":");
+          const lastPart = parts[parts.length - 1];
+          if (lastPart && /^\d+$/.test(lastPart)) {
+            senderId = lastPart;
+            dlog(`before_prompt_build: sender extracted from sessionKey: ${senderId}`);
+          }
+        }
+        if (!senderId) senderId = "unknown";
 
         dlog(`before_prompt_build: query="${userQuery.substring(0, 50)}", sender=${senderId}, session=${sessionId}`);
 
