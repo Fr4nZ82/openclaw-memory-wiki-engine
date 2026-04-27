@@ -62,6 +62,10 @@ let config: PluginConfig | null = null;
 let dreamTimer: ReturnType<typeof setInterval> | null = null;
 let remTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Cached from message_received — used by before_prompt_build which lacks sender info
+let lastReceivedSenderId: string | null = null;
+let lastReceivedSessionId: string | null = null;
+
 // Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
 let dbModule: typeof import("./db") | null = null;
 
@@ -132,6 +136,10 @@ function register(api: any): void {
         const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || "unknown";
 
         dlog(`Resolved sender: id=${senderId}, name=${senderName}, session=${sessionKey}`);
+
+        // Cache for before_prompt_build (which lacks sender info in its event schema)
+        lastReceivedSenderId = senderId;
+        lastReceivedSessionId = sessionKey;
 
         const message: IncomingMessage = {
           text: event.content || event.text || "",
@@ -211,9 +219,23 @@ function register(api: any): void {
 
       try {
         dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
-        const userQuery = event.lastUserMessage || event.text || event.content || "";
-        const senderId = event.metadata?.senderId || event.from || "unknown";
-        const sessionId = event.metadata?.sessionKey || event.metadata?.channelId || "unknown";
+
+        // This hook has a different schema: { prompt, messages }
+        // Extract sender and query from the messages array
+        const messages: any[] = event.messages || [];
+        const lastUserMsg = [...messages].reverse().find(
+          (m: any) => m.role === "user"
+        );
+
+        const userQuery = lastUserMsg?.content
+          ? (typeof lastUserMsg.content === "string"
+              ? lastUserMsg.content
+              : lastUserMsg.content?.[0]?.text || "")
+          : "";
+
+        // Try to get sender from the last message_received we cached
+        const senderId = lastReceivedSenderId || "unknown";
+        const sessionId = lastReceivedSessionId || "unknown";
 
         dlog(`before_prompt_build: query="${userQuery.substring(0, 50)}", sender=${senderId}, session=${sessionId}`);
 
