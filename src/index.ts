@@ -245,40 +245,57 @@ function register(api: any): void {
         // ---------------------------------------------------------------
         const messages: any[] = event.messages || [];
 
-        const CONV_INFO_PREFIX = "Conversation info (untrusted metadata):";
+        /**
+         * Detect OpenClaw message envelopes.
+         * OpenClaw wraps user messages in various "(untrusted metadata):" formats:
+         *   - "Conversation info (untrusted metadata):"
+         *   - "Sender (untrusted metadata):"
+         *   - possibly others in future SDK versions
+         * All share the pattern: header + ```json block + user text after closing ```.
+         */
+        function isWrappedMessage(content: string): boolean {
+          return content.includes("(untrusted metadata):") && content.includes("```json");
+        }
 
         /**
-         * Parse the "Conversation info" envelope.
+         * Parse an OpenClaw message envelope (any format).
          * Returns { userText, senderId } or null if parsing fails.
          */
-        function parseConversationInfo(raw: string): { userText: string; senderId: string } | null {
-          // Find the closing ``` of the JSON block
-          // Format: "Conversation info...\n```json\n{...}\n```\n\n[user text]"
-          const closingFenceIdx = raw.indexOf("\n```\n", raw.indexOf("```json"));
-          if (closingFenceIdx === -1) {
-            // Alternative: try ``` at end of line without trailing \n
-            const altIdx = raw.indexOf("\n```", raw.indexOf("```json") + 7);
-            if (altIdx === -1) return null;
-            const userText = raw.substring(altIdx + 4).trim();
-            return { userText, senderId: extractSenderFromConvInfo(raw) };
-          }
+        function parseWrappedMessage(raw: string): { userText: string; senderId: string } | null {
+          const jsonStart = raw.indexOf("```json");
+          if (jsonStart === -1) return null;
 
-          const userText = raw.substring(closingFenceIdx + 4).trim(); // skip "\n```\n"
-          const senderId = extractSenderFromConvInfo(raw);
+          // Find the closing ``` after the json block
+          // Try "\n```\n" first (most common), then "\n```" at EOF
+          let closingIdx = raw.indexOf("\n```\n", jsonStart + 7);
+          let skipLen = 4; // length of "\n```\n"
+          if (closingIdx === -1) {
+            closingIdx = raw.indexOf("\n```", jsonStart + 7);
+            skipLen = 4; // "\n```" (no trailing \n, but trim handles it)
+          }
+          if (closingIdx === -1) return null;
+
+          const userText = raw.substring(closingIdx + skipLen).trim();
+          const senderId = extractSenderFromEnvelope(raw);
+
+          dlog(`  parseWrappedMessage: userText="${userText.substring(0, 60)}...", senderId=${senderId}`);
           return { userText, senderId };
         }
 
         /**
-         * Extract sender ID from the "Conversation info" JSON block.
-         * Looks for "chat_id": "telegram:NNNNN" pattern.
+         * Extract sender ID from the JSON metadata block inside any OpenClaw envelope.
+         * Tries multiple field names used across different envelope formats.
          */
-        function extractSenderFromConvInfo(raw: string): string {
-          // Try to extract chat_id from JSON
+        function extractSenderFromEnvelope(raw: string): string {
+          // chat_id: "telegram:7776007798" → extract 7776007798
           const chatIdMatch = raw.match(/"chat_id"\s*:\s*"(?:telegram:|discord:)(\d+)"/);
           if (chatIdMatch) return chatIdMatch[1];
-          // Fallback: try sender_id
+          // sender_id: "7776007798"
           const senderMatch = raw.match(/"sender_id"\s*:\s*"(\d+)"/);
           if (senderMatch) return senderMatch[1];
+          // user_id: "7776007798"
+          const userIdMatch = raw.match(/"user_id"\s*:\s*"(\d+)"/);
+          if (userIdMatch) return userIdMatch[1];
           return "";
         }
 
@@ -300,9 +317,9 @@ function register(api: any): void {
               : "";
           const trimmed = raw.trim();
 
-          // Is this a "Conversation info" wrapped message?
-          if (trimmed.startsWith(CONV_INFO_PREFIX)) {
-            const parsed = parseConversationInfo(trimmed);
+          // Is this an OpenClaw-wrapped message (any envelope format)?
+          if (isWrappedMessage(trimmed)) {
+            const parsed = parseWrappedMessage(trimmed);
             if (parsed && parsed.userText) {
               userQuery = parsed.userText;
               extractedSenderId = parsed.senderId;
@@ -310,7 +327,7 @@ function register(api: any): void {
               dlog(`  FOUND real user message in msg[${i}]: "${userQuery.substring(0, 60)}..." sender=${extractedSenderId}`);
               break;
             } else {
-              dlog(`  msg[${i}]: Conversation info but could not parse user text — skipping`);
+              dlog(`  msg[${i}]: wrapped envelope but empty user text — skipping`);
               continue;
             }
           }
