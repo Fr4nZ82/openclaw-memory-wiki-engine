@@ -175,7 +175,10 @@ Analyze the message and respond with valid JSON:
    both an action and a fact (rare — when in doubt, choose is_task only).
 
 5. **fact_text**: the extracted fact, rephrased in third person, clean.
-   IMPORTANT: resolve relative dates using the message timestamp.
+   IMPORTANT: write the fact in the SAME LANGUAGE as the original message.
+   If the message is in Italian, the fact_text must be in Italian.
+   If the message is in English, the fact_text must be in English.
+   Resolve relative dates using the message timestamp.
    "tomorrow" → concrete date. "last Saturday" → concrete date.
    "last week" → concrete date.
 

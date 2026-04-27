@@ -566,8 +566,7 @@ function register(api: any): void {
     api.registerCommand({
       name: "wiki-ingest",
       description:
-        "Digests files from the raw/ folder (MD, TXT, JSON) and " +
-        "transforms them into wiki pages or facts in the database",
+        "Ingests files from raw/ folder into wiki pages and facts",
       acceptsArgs: false,
       requireAuth: false,
       handler: async () => {
