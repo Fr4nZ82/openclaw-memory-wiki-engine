@@ -281,11 +281,23 @@ function register(api: any): void {
           const jsonStart = raw.indexOf("```json");
           if (jsonStart === -1) return { userText: "", senderId };
 
-          let closingIdx = raw.indexOf("\n```\n", jsonStart + 7);
-          if (closingIdx === -1) closingIdx = raw.indexOf("\n```", jsonStart + 7);
-          if (closingIdx === -1) return { userText: "", senderId };
+          // Find the LAST ``` in the text — that's the closing fence.
+          // We search from the end because the opening fence is first.
+          const lastFence = raw.lastIndexOf("```");
+          if (lastFence <= jsonStart) {
+            // Only one ``` found (the opening) — no closing fence
+            dlog(`    parseEnvelopeText: no closing fence found (lastFence=${lastFence}, jsonStart=${jsonStart})`);
+            return { userText: "", senderId };
+          }
 
-          const afterFence = raw.substring(closingIdx + 4).trim();
+          // Everything after the closing ``` is the user text
+          const afterFence = raw.substring(lastFence + 3).trim();
+
+          // Debug: show the region around the closing fence
+          const fenceContext = raw.substring(Math.max(0, lastFence - 20), Math.min(raw.length, lastFence + 20))
+            .replace(/\n/g, "\\n").replace(/\r/g, "\\r");
+          dlog(`    parseEnvelopeText: lastFence=${lastFence}, afterFence="${afterFence.substring(0, 80)}...", context="${fenceContext}"`);
+
           return { userText: afterFence, senderId };
         }
 
