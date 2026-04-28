@@ -41,7 +41,7 @@ import {
   resetStatements,
   type IncomingMessage,
 } from "./capture";
-import { buildRecallContext } from "./recall";
+import { buildRecallContext, resolveCanonicalId } from "./recall";
 import { dreamLight, dreamRem } from "./dream";
 import {
   wikiIngest,
@@ -61,6 +61,17 @@ let db: Database.Database | null = null;
 let config: PluginConfig | null = null;
 let dreamTimer: ReturnType<typeof setInterval> | null = null;
 let remTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Sender ID from the most recent before_prompt_build call.
+ * Used by the `remember` tool to attribute facts to the correct user
+ * (since tools don't have direct access to the conversation event).
+ *
+ * This is safe because OpenClaw processes one conversation turn at a time
+ * per gateway instance — the sender resolved in before_prompt_build is
+ * the same sender whose tool calls execute immediately after.
+ */
+let lastResolvedSender: string = "unknown";
 
 
 // Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
@@ -438,6 +449,9 @@ function register(api: any): void {
         }
         if (!senderId) senderId = "unknown";
 
+        // Save for the remember tool (BUG-10 fix)
+        lastResolvedSender = senderId;
+
         dlog(`before_prompt_build: query="${userQuery.substring(0, 50)}", sender=${senderId}, session=${sessionId}`);
 
         const recallCtx = await buildRecallContext(
@@ -541,6 +555,14 @@ function register(api: any): void {
             enum: ["fact", "preference", "rule", "episode"],
             description: "Fact type",
           },
+          owner: {
+            type: "string",
+            description:
+              "Who this fact is about (canonical name, lowercase). " +
+              "Use when the fact is about someone other than the current speaker. " +
+              "E.g. 'gollum' for Daniel, 'galadriel' for Xhenete. " +
+              "If omitted, defaults to the current speaker.",
+          },
         },
         required: ["fact"],
       },
@@ -550,25 +572,40 @@ function register(api: any): void {
 
         const fact = params.fact as string;
         const factType = (params.fact_type as string) || "fact";
-        const senderId = "manual";
+        const explicitOwner = params.owner as string | undefined;
 
-        // Insert directly as capture (will be promoted by the dream)
+        // Resolve sender: use lastResolvedSender from before_prompt_build
+        const senderId = lastResolvedSender !== "unknown" ? lastResolvedSender : "unknown";
+
+        // Resolve owner: explicit param > canonical from sender > fallback
+        let ownerId: string;
+        if (explicitOwner) {
+          ownerId = explicitOwner.toLowerCase();
+        } else if (senderId !== "unknown" && database) {
+          ownerId = resolveCanonicalId(database, senderId);
+        } else {
+          ownerId = "unknown";
+        }
+
+        dlog(`remember tool: fact="${fact.substring(0, 60)}", sender=${senderId}, owner=${ownerId}, type=${factType}`);
+
+        // Insert as capture (will be promoted by the dream cycle)
         database.prepare(
           `INSERT INTO session_captures
             (session_id, message_text, fact_text, topics, sender_id,
              owner_type, owner_id, fact_type, is_internal, captured_at)
            VALUES (?, ?, ?, ?, ?, 'user', ?, ?, 0, datetime('now'))`
         ).run(
-          "manual",
+          `remember-${senderId}`,
           `remember: ${fact}`,
           fact,
-          topicsToJson(["manual"]),
+          topicsToJson([ownerId, factType]),
           senderId,
-          senderId,
+          ownerId,
           factType
         );
 
-        return { content: [{ type: "text", text: `✅ Will remember: "${fact}"` }] };
+        return { content: [{ type: "text", text: `✅ Will remember: "${fact}" [owner: ${ownerId}]` }] };
       },
     });
 

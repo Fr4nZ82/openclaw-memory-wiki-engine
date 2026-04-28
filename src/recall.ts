@@ -43,7 +43,7 @@ const log = dbg("recall");
  * Looks up the users table: sender_id → names[0] (canonical) → lowercase.
  * Falls back to the raw senderId if not found.
  */
-function resolveCanonicalId(
+export function resolveCanonicalId(
   db: Database.Database,
   senderId: string
 ): string {

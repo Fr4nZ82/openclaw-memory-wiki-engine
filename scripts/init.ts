@@ -319,6 +319,12 @@ Rules for fact_type:
 - "rule" — changes the assistant's behavior
 - "episode" — temporary state (medical recovery, currently reading a book)
 
+IMPORTANT language rule:
+- Write each fact_text in the SAME LANGUAGE as the source document.
+- If the source is in Italian, the fact_text MUST be in Italian.
+- If the source is in English, the fact_text MUST be in English.
+- Do NOT translate facts to English.
+
 Respond ONLY with the JSON array, no markdown fences, no explanations.`;
 }
 
