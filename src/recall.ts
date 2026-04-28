@@ -67,6 +67,50 @@ export function resolveCanonicalId(
   }
 }
 
+/**
+ * Resolves ALL raw sender_ids that belong to the same canonical user.
+ *
+ * Given a canonical ID (e.g. "frodo"), returns all sender_ids from the
+ * users table whose names[0].toLowerCase() matches. This enables
+ * cross-channel recall: facts sent from Telegram, Discord, etc. are
+ * all visible regardless of the current channel.
+ *
+ * The raw sender_id is preserved in the facts table for provenance
+ * tracking ("from where was this sent?"), while this function bridges
+ * identity across channels at query time.
+ *
+ * Falls back to [rawSenderId] if no matches found.
+ */
+export function resolveAllSenderIds(
+  db: Database.Database,
+  canonicalId: string,
+  rawSenderId: string
+): string[] {
+  const rows = db
+    .prepare("SELECT sender_id, names FROM users")
+    .all() as Array<{ sender_id: string; names: string }>;
+
+  const result: string[] = [];
+  for (const row of rows) {
+    try {
+      const names = JSON.parse(row.names) as string[];
+      if (names[0]?.toLowerCase() === canonicalId) {
+        result.push(row.sender_id);
+      }
+    } catch {
+      // invalid JSON, skip
+    }
+  }
+
+  // Always include the current raw ID (even if not in users table)
+  if (!result.includes(rawSenderId)) {
+    result.push(rawSenderId);
+  }
+
+  log(`resolveAllSenderIds: canonical=${canonicalId} → [${result.join(', ')}]`);
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -124,7 +168,9 @@ export async function buildRecallContext(
 
   // Resolve Telegram numeric ID → canonical owner_id (e.g. "frodo")
   const canonicalId = resolveCanonicalId(db, senderId);
-  log(`buildRecallContext: sender=${senderId}, canonical=${canonicalId}, session=${sessionId}, query="${userQuery.substring(0, 50)}"`);
+  // Resolve ALL sender_ids for this canonical user (cross-channel support)
+  const allSenderIds = resolveAllSenderIds(db, canonicalId, senderId);
+  log(`buildRecallContext: sender=${senderId}, canonical=${canonicalId}, allSenders=[${allSenderIds.join(',')}], session=${sessionId}, query="${userQuery.substring(0, 50)}"`);
 
   // -----------------------------------------------------------------
   // 1. MEMORY.md — operational rules (always on top)
@@ -170,7 +216,7 @@ export async function buildRecallContext(
       config,
       userQuery,
       canonicalId,
-      senderId,  // raw sender ID for "things I said" visibility
+      allSenderIds,  // all sender IDs for cross-channel "things I said" visibility
       config.recallTopK
     );
     details.vectorSearchUsed = facts.vectorUsed;
@@ -351,8 +397,12 @@ interface HybridSearchResult {
  *
  * Visibility: a user sees facts where:
  *   - owner_id matches their canonical ID (facts ABOUT them)
- *   - sender_id matches their raw ID (facts THEY said, even about others)
+ *   - sender_id matches ANY of their raw IDs (facts THEY said, from any channel)
  *   - owner_type is 'global' or 'group'
+ *
+ * Cross-channel: allSenderIds contains all raw sender_ids that resolve to the
+ * same canonical user (e.g. Telegram ID, Discord ID). This ensures facts sent
+ * from one channel are visible when querying from another.
  *
  * If the Ollama server is offline → BM25 only (graceful degradation).
  * If the query is very short → BM25 only (embedding not useful).
@@ -362,11 +412,11 @@ async function hybridSearch(
   config: PluginConfig,
   query: string,
   canonicalId: string,
-  rawSenderId: string,
+  allSenderIds: string[],
   topK: number
 ): Promise<HybridSearchResult> {
   // BM25: always available
-  const bm25Results = searchBM25(db, query, canonicalId, rawSenderId, topK * 2);
+  const bm25Results = searchBM25(db, query, canonicalId, allSenderIds, topK * 2);
 
   // Vector: only if Ollama is online and query is substantial
   let vectorResults: Map<string, number> = new Map();
@@ -375,7 +425,7 @@ async function hybridSearch(
   if (query.length > 20 && (await isOllamaAvailable(config))) {
     try {
       const queryEmbedding = await generateEmbedding(query, config);
-      vectorResults = searchVector(db, queryEmbedding, canonicalId, rawSenderId, topK * 2);
+      vectorResults = searchVector(db, queryEmbedding, canonicalId, allSenderIds, topK * 2);
       vectorUsed = true;
     } catch {
       // Ollama unreachable, proceeding with BM25 only
@@ -417,14 +467,14 @@ async function hybridSearch(
 
 /**
  * BM25 search on the FTS5 table.
- * Dual visibility: shows facts owned by the user OR sent by the user,
- * plus global and group facts.
+ * Dual visibility: shows facts owned by the user OR sent by the user
+ * (from any channel), plus global and group facts.
  */
 function searchBM25(
   db: Database.Database,
   query: string,
   canonicalId: string,
-  rawSenderId: string,
+  allSenderIds: string[],
   limit: number
 ): Map<string, number> {
   const results = new Map<string, number>();
@@ -438,6 +488,9 @@ function searchBM25(
 
   if (!ftsQuery) return results;
 
+  // Build dynamic IN clause for sender_ids
+  const senderPlaceholders = allSenderIds.map(() => '?').join(', ');
+
   const rows = db
     .prepare(
       `SELECT f.id, bm25(facts_fts) as score
@@ -447,14 +500,14 @@ function searchBM25(
          AND f.is_active = 1
          AND (
            f.owner_id = ? OR
-           f.sender_id = ? OR
+           f.sender_id IN (${senderPlaceholders}) OR
            f.owner_type = 'global' OR
            f.owner_type = 'group'
          )
        ORDER BY score
        LIMIT ?`
     )
-    .all(ftsQuery, canonicalId, rawSenderId, limit) as Array<{ id: string; score: number }>;
+    .all(ftsQuery, canonicalId, ...allSenderIds, limit) as Array<{ id: string; score: number }>;
 
   for (const row of rows) {
     // BM25 returns negative values (more negative = more relevant)
@@ -475,8 +528,8 @@ function searchBM25(
  * Vector search: computes cosine similarity between the query
  * and all facts with embeddings.
  *
- * Dual visibility: loads facts owned by the user OR sent by the user,
- * plus global and group facts.
+ * Dual visibility: loads facts owned by the user OR sent by the user
+ * (from any channel), plus global and group facts.
  *
  * NOTE: Without sqlite-vec, search is done in-memory.
  * For our dataset (< 10k facts) this is performant.
@@ -486,10 +539,13 @@ function searchVector(
   db: Database.Database,
   queryEmbedding: number[],
   canonicalId: string,
-  rawSenderId: string,
+  allSenderIds: string[],
   limit: number
 ): Map<string, number> {
   const results = new Map<string, number>();
+
+  // Build dynamic IN clause for sender_ids
+  const senderPlaceholders = allSenderIds.map(() => '?').join(', ');
 
   // Load all active facts with embeddings
   const rows = db
@@ -499,12 +555,12 @@ function searchVector(
          AND embedding IS NOT NULL
          AND (
            owner_id = ? OR
-           sender_id = ? OR
+           sender_id IN (${senderPlaceholders}) OR
            owner_type = 'global' OR
            owner_type = 'group'
          )`
     )
-    .all(canonicalId, rawSenderId) as Array<{ id: string; embedding: Buffer }>;
+    .all(canonicalId, ...allSenderIds) as Array<{ id: string; embedding: Buffer }>;
 
   for (const row of rows) {
     try {
