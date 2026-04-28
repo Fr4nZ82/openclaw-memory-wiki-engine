@@ -101,6 +101,7 @@ function resolveEmbeddingUrl(): string {
     try {
       const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
       const pluginConfig = config?.plugins?.entries?.["openclaw-memory-wiki-engine"]?.config;
+      if (pluginConfig?.embeddingUrl) return pluginConfig.embeddingUrl;
       if (pluginConfig?.ollamaUrl) return pluginConfig.ollamaUrl;
     } catch { /* fall through to default */ }
   }
