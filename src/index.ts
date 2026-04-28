@@ -437,7 +437,7 @@ function register(api: any): void {
         const sessionId = event.sessionKey
           || event.metadata?.sessionKey
           || event.metadata?.channelId
-          || "unknown";
+          || (extractedSenderId ? `telegram:${extractedSenderId}` : "unknown");
 
         if (!senderId && sessionId !== "unknown") {
           const parts = sessionId.split(":");
