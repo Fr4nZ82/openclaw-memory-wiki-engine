@@ -519,11 +519,13 @@ function register(api: any): void {
         if (!database || !config) return { content: [{ type: "text", text: "Memory not initialized" }] };
 
         const query = params.query as string;
-        const senderId = extractSenderId(undefined);
+        // Use sender from before_prompt_build (same pattern as remember tool)
+        const senderId = lastResolvedSender !== "unknown" ? lastResolvedSender : "unknown";
+        const sessionId = senderId !== "unknown" ? `telegram:${senderId}` : "unknown";
         const recallCtx = await buildRecallContext(
           database,
           config,
-          "unknown",
+          sessionId,
           query,
           senderId
         );

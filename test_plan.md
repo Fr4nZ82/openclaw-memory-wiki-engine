@@ -48,7 +48,7 @@
 | 2.6 | Owner distribution | gollum:13, frodo:9, famiglia:7, galadriel:5, bilbo:2, global:1, admin:1 | ✅ |
 | 2.7 | Embeddings | 37 embedding generati via Torre (192.168.1.136:11434) con nomic-embed-text | ✅ |
 
-## Phase 3 — Live Capture (Classifier + Archive) 🔄
+## Phase 3 — Live Capture (Classifier + Archive) ✅
 
 > Francesco invia messaggi su Telegram a Sam.
 
@@ -63,7 +63,7 @@
 | 3.7 | Regola | "Daniel non può usare il PC per più di 2 ore al giorno" | fact_type=rule, owner=gollum | ✅ |
 | 3.8 | Cross-user | "A Jenny piace il tiramisù, ma solo senza glutine!" | owner=galadriel (resolved from alias) | ✅ |
 | 3.9a | Fatto gruppo (1st) | "Serve comprare il detersivo per la lavastoviglie" | classifier → is_task=true, owner=famiglia ✅ (corretto skip: è un task) | ✅ |
-| 3.9b | Fatto gruppo (retry) | "A casa nostra si mangia sempre alle 20" | classifier → owner=admin ⚠️ (expected: famiglia). fact_type=rule ✅ | ⚠️ |
+| 3.9b | Fatto gruppo (retry) | "A casa nostra si mangia sempre alle 20" | owner=famiglia ✅ (dopo fix scope, commit `19a4c18`) | ✅ |
 | 3.10 | Archive check | Query: `SELECT COUNT(*) FROM session_archive` | ≥ 7 messages | ✅ |
 | 3.11 | Captures check | Query: `SELECT * FROM session_captures WHERE promoted=0` | ≥ 2 captures | ✅ |
 
@@ -101,16 +101,16 @@
 | 6.4 | MEMORY.md | `wiki-engine/MEMORY.md` rigenerato con regole per frodo, galadriel, global, gollum — in italiano | ✅ |
 | 6.5 | Dream report | Report mostrato direttamente nella risposta Telegram | ✅ |
 
-## Phase 7 — Tools 🔄
+## Phase 7 — Tools ✅
 
 > Francesco chiede a Sam di usare i tool.
 
 | # | Test | Messaggio/Azione | Expected | Status |
 |---|------|-----------------|----------|--------|
 | 7.1 | memory_search (recall) | "Quando è il compleanno di Daniel?" | Sam risponde "31 ottobre 2017" dal DB | ✅ |
-| 7.2 | remember | "Ricordati che la password del WiFi è Gandalf2024" | Capture creata con owner corretto (no "manual") | ⬜ |
-| 7.3 | archive_search | "Cerca nei transcript vecchi..." | Trova messaggi | ⬜ |
-| 7.4 | wiki_status | "Mostrami lo status del wiki" | Report con page count | ⬜ |
+| 7.2 | remember | "Ricordati che la password del WiFi casa è caccasecca" | owner=frodo ✅ (no "manual"). Classifier cattura anche come owner=famiglia | ✅ |
+| 7.3 | archive_search | "Cerca nei tuoi ricordi cosa ho detto sul cibo ieri" | Sam usa memory_search + archive_search, trova pizza/sushi/McDonald's | ✅ |
+| 7.4 | wiki_status | "Mostrami lo status del wiki della memoria" | 6 pages, 4 entities, 1 group, 1 concept | ✅ |
 
 ## Phase 8 — Wiki Operations ⬜
 
@@ -259,6 +259,26 @@ Completata 2026-04-28:
 
 **Fix**: Aggiunto check prioritario per `pluginConfig.embeddingUrl` prima di `ollamaUrl`.
 **Commit**: `d736a56`
+
+#### BUG-12: Classifier prompt senza group scope → attribuzione gruppo sbagliata ❌→✅
+
+**Root cause**: Il prompt del classifier mostrava i gruppi dell'utente come `- famiglia (Famiglia)` senza la colonna `scope`. Senza scope, Gemini non sa distinguere quale gruppo possiede un fatto ("regole della casa" → famiglia o admin?). Test 3.9b ha fallito con `owner=admin` per un fatto domestico.
+
+**Fix**: 
+1. Aggiunto `scope` a `UserGroupInfo` interface
+2. Query `getUserGroups()` ora include `g.scope`
+3. Il prompt mostra: `- famiglia (Famiglia)\n  Scope: Regole della casa; Spesa e lista; ...`
+
+**Commit**: `19a4c18`
+
+#### BUG-13: `session=unknown` nel `before_prompt_build` su Telegram ❌→✅
+
+**Root cause**: L'hook `before_prompt_build` riceve `event = {prompt, messages}` senza `event.from`, `event.sessionKey` né `event.metadata`. Il fallback per `sessionId` era sempre `"unknown"`. Nel `message_received` funzionava perché usa `event.from` (es. `telegram:7776007798`).
+
+**Impatto**: Il recall usava `session=unknown` per le query sulle session_captures → nessun match session-scoped.
+
+**Fix**: Fallback a `telegram:${extractedSenderId}` (sender estratto dall'envelope metadata dei messaggi).
+**Commit**: `79f81cf`
 
 ## Dream REM manuale ✅
 
