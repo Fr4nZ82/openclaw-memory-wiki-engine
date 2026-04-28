@@ -170,6 +170,7 @@ export async function buildRecallContext(
       config,
       userQuery,
       canonicalId,
+      senderId,  // raw sender ID for "things I said" visibility
       config.recallTopK
     );
     details.vectorSearchUsed = facts.vectorUsed;
@@ -348,6 +349,11 @@ interface HybridSearchResult {
  *
  * Default weights: BM25 70%, vector 30%.
  *
+ * Visibility: a user sees facts where:
+ *   - owner_id matches their canonical ID (facts ABOUT them)
+ *   - sender_id matches their raw ID (facts THEY said, even about others)
+ *   - owner_type is 'global' or 'group'
+ *
  * If the Ollama server is offline → BM25 only (graceful degradation).
  * If the query is very short → BM25 only (embedding not useful).
  */
@@ -355,11 +361,12 @@ async function hybridSearch(
   db: Database.Database,
   config: PluginConfig,
   query: string,
-  senderId: string,
+  canonicalId: string,
+  rawSenderId: string,
   topK: number
 ): Promise<HybridSearchResult> {
   // BM25: always available
-  const bm25Results = searchBM25(db, query, senderId, topK * 2);
+  const bm25Results = searchBM25(db, query, canonicalId, rawSenderId, topK * 2);
 
   // Vector: only if Ollama is online and query is substantial
   let vectorResults: Map<string, number> = new Map();
@@ -368,7 +375,7 @@ async function hybridSearch(
   if (query.length > 20 && (await isOllamaAvailable(config))) {
     try {
       const queryEmbedding = await generateEmbedding(query, config);
-      vectorResults = searchVector(db, queryEmbedding, senderId, topK * 2);
+      vectorResults = searchVector(db, queryEmbedding, canonicalId, rawSenderId, topK * 2);
       vectorUsed = true;
     } catch {
       // Ollama unreachable, proceeding with BM25 only
@@ -410,12 +417,14 @@ async function hybridSearch(
 
 /**
  * BM25 search on the FTS5 table.
- * Filters by owner (shows only the user's, global, or group facts).
+ * Dual visibility: shows facts owned by the user OR sent by the user,
+ * plus global and group facts.
  */
 function searchBM25(
   db: Database.Database,
   query: string,
-  senderId: string,
+  canonicalId: string,
+  rawSenderId: string,
   limit: number
 ): Map<string, number> {
   const results = new Map<string, number>();
@@ -438,13 +447,14 @@ function searchBM25(
          AND f.is_active = 1
          AND (
            f.owner_id = ? OR
+           f.sender_id = ? OR
            f.owner_type = 'global' OR
            f.owner_type = 'group'
          )
        ORDER BY score
        LIMIT ?`
     )
-    .all(ftsQuery, senderId, limit) as Array<{ id: string; score: number }>;
+    .all(ftsQuery, canonicalId, rawSenderId, limit) as Array<{ id: string; score: number }>;
 
   for (const row of rows) {
     // BM25 returns negative values (more negative = more relevant)
@@ -465,6 +475,9 @@ function searchBM25(
  * Vector search: computes cosine similarity between the query
  * and all facts with embeddings.
  *
+ * Dual visibility: loads facts owned by the user OR sent by the user,
+ * plus global and group facts.
+ *
  * NOTE: Without sqlite-vec, search is done in-memory.
  * For our dataset (< 10k facts) this is performant.
  * If the dataset grows, migrate to sqlite-vec.
@@ -472,7 +485,8 @@ function searchBM25(
 function searchVector(
   db: Database.Database,
   queryEmbedding: number[],
-  senderId: string,
+  canonicalId: string,
+  rawSenderId: string,
   limit: number
 ): Map<string, number> {
   const results = new Map<string, number>();
@@ -485,11 +499,12 @@ function searchVector(
          AND embedding IS NOT NULL
          AND (
            owner_id = ? OR
+           sender_id = ? OR
            owner_type = 'global' OR
            owner_type = 'group'
          )`
     )
-    .all(senderId) as Array<{ id: string; embedding: Buffer }>;
+    .all(canonicalId, rawSenderId) as Array<{ id: string; embedding: Buffer }>;
 
   for (const row of rows) {
     try {
