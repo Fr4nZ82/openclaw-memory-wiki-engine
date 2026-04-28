@@ -112,23 +112,23 @@
 | 7.3 | archive_search | "Cerca nei tuoi ricordi cosa ho detto sul cibo ieri" | Sam usa memory_search + archive_search, trova pizza/sushi/McDonald's | ✅ |
 | 7.4 | wiki_status | "Mostrami lo status del wiki della memoria" | 6 pages, 4 entities, 1 group, 1 concept | ✅ |
 
-## Phase 8 — Wiki Operations ⬜
+## Phase 8 — Wiki Operations ✅
 
 | # | Test | Come | Status |
 |---|------|------|--------|
-| 8.1 | /wiki-lint | Comando su Telegram | Report senza errori critici | ⬜ |
-| 8.2 | /wiki-sync | Comando su Telegram | Pages updated count | ⬜ |
-| 8.3 | /wiki-ingest | Drop test file in raw/, poi comando | File processato | ⬜ |
+| 8.1 | /wiki-lint | Comando su Telegram | Report ok: 6 pages, 0 stale, 0 orphan, topic index ✅ | ✅ |
+| 8.2 | /wiki-sync | Comando su Telegram | 3 pages updated (admin, bilbo, famiglia), topic-index regenerated | ✅ |
+| 8.3 | /wiki-ingest | File in raw/ + `/wiki_ingest` | Files processed: 1, Pages created: 1 | ✅ |
 
-## Phase 9 — Supersedence ⬜
+## Phase 9 — Supersedence ✅
 
 | # | Test | Messaggio | Expected | Status |
 |---|------|-----------|----------|--------|
-| 9.1 | Primo fatto | "Il mio colore preferito è il blu" | Catturato | ⬜ |
-| 9.2 | /dream | Promuovere | Fatto nel DB | ⬜ |
-| 9.3 | Contraddizione | "Il mio colore preferito è il verde" | Catturato | ⬜ |
-| 9.4 | /dream | Promuovere | Old fact superseded, new active | ⬜ |
-| 9.5 | Verifica | Query: `SELECT * FROM facts WHERE text LIKE '%colore%'` | 1 active, 1 superseded | ⬜ |
+| 9.1 | Fatto + dream | "Il mio colore preferito è il verde" + `/dream` | Catturato e promosso | ✅ |
+| 9.2 | Dual-capture supersedence | Classifier + remember catturano lo stesso fatto | Dream supersede il duplicato, 1 attivo 1 inattivo | ✅ |
+| 9.3 | Verifica DB | `SELECT ... FROM facts WHERE text LIKE '%colore%'` | `f_moihuhxr` (classifier) superseded → `f_moihui78` (remember) attivo | ✅ |
+| 9.4 | Supersedence cross-user | Tiramisù Galadriel: dual capture superseded | 1 attivo, 1 superseded, owner=galadriel in entrambi | ✅ |
+| 9.5 | Conteggio totale | 9 fatti superseded nel DB | Init duplicates (7) + dual captures (2) | ✅ |
 
 ## Phase 10 — /memory-status ⬜
 

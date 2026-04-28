@@ -540,82 +540,11 @@ function register(api: any): void {
       },
     });
 
-    // -------------------------------------------------------------------
-    // Tool: remember
-    // -------------------------------------------------------------------
-
-    api.registerTool({
-      name: "remember",
-      label: "Remember",
-      description:
-        "Explicitly save a fact to memory. Use when a user says " +
-        "'remember that...' or when you want to save something " +
-        "important that might be useful in the future.",
-      parameters: {
-        type: "object",
-        properties: {
-          fact: {
-            type: "string",
-            description: "The fact to remember",
-          },
-          fact_type: {
-            type: "string",
-            enum: ["fact", "preference", "rule", "episode"],
-            description: "Fact type",
-          },
-          owner: {
-            type: "string",
-            description:
-              "Who this fact is about (canonical name, lowercase). " +
-              "Use when the fact is about someone other than the current speaker. " +
-              "E.g. 'gollum' for Daniel, 'galadriel' for Xhenete. " +
-              "If omitted, defaults to the current speaker.",
-          },
-        },
-        required: ["fact"],
-      },
-      async execute(_toolCallId: string, params: Record<string, unknown>) {
-        const database = getDb();
-        if (!database || !config) return { content: [{ type: "text", text: "Memory not initialized" }] };
-
-        const fact = params.fact as string;
-        const factType = (params.fact_type as string) || "fact";
-        const explicitOwner = params.owner as string | undefined;
-
-        // Resolve sender: use lastResolvedSender from before_prompt_build
-        const senderId = lastResolvedSender !== "unknown" ? lastResolvedSender : "unknown";
-
-        // Resolve owner: explicit param > canonical from sender > fallback
-        let ownerId: string;
-        if (explicitOwner) {
-          ownerId = explicitOwner.toLowerCase();
-        } else if (senderId !== "unknown" && database) {
-          ownerId = resolveCanonicalId(database, senderId);
-        } else {
-          ownerId = "unknown";
-        }
-
-        dlog(`remember tool: fact="${fact.substring(0, 60)}", sender=${senderId}, owner=${ownerId}, type=${factType}`);
-
-        // Insert as capture (will be promoted by the dream cycle)
-        database.prepare(
-          `INSERT INTO session_captures
-            (session_id, message_text, fact_text, topics, sender_id,
-             owner_type, owner_id, fact_type, is_internal, captured_at)
-           VALUES (?, ?, ?, ?, ?, 'user', ?, ?, 0, datetime('now'))`
-        ).run(
-          `remember-${senderId}`,
-          `remember: ${fact}`,
-          fact,
-          topicsToJson([ownerId, factType]),
-          senderId,
-          ownerId,
-          factType
-        );
-
-        return { content: [{ type: "text", text: `✅ Will remember: "${fact}" [owner: ${ownerId}]` }] };
-      },
-    });
+    // NOTE: `remember` tool removed (2026-04-28).
+    // The automatic classifier pipeline in message_received already captures
+    // all memorable facts with better quality (proper topics, group scope,
+    // Gemini-classified fact_type). The remember tool created duplicates that
+    // the dream had to supersede. Not required by the OpenClaw SDK.
 
     // -------------------------------------------------------------------
     // Tool: archive_search
