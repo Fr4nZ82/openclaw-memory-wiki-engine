@@ -280,6 +280,13 @@ Completata 2026-04-28:
 **Fix**: Fallback a `telegram:${extractedSenderId}` (sender estratto dall'envelope metadata dei messaggi).
 **Commit**: `79f81cf`
 
+#### BUG-14: `memory_search` tool con `sender=unknown` → recall non scoped ❌→✅
+
+**Root cause**: Il tool `memory_search` usava `extractSenderId(undefined)` che restituiva sempre `"unknown"`. Il recall non filtrava per utente, restituendo fatti di tutti.
+
+**Fix**: Usa `lastResolvedSender` (settato in `before_prompt_build`), stesso pattern del tool `remember` (BUG-10).
+**Commit**: `ffb53fa`
+
 ## Dream REM manuale ✅
 
 Triggered via Telegram `/dream rem` il 2026-04-28:

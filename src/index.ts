@@ -166,6 +166,12 @@ function register(api: any): void {
         // Skip empty messages
         if (!message.text.trim()) return;
 
+        // Skip slash commands — handled by the command system, not worth classifying
+        if (message.text.trim().startsWith("/")) {
+          dlog(`SKIPPED slash command: "${message.text.trim().substring(0, 30)}"`);
+          return;
+        }
+
         dlog(`processUserMessage START: "${message.text.substring(0, 60)}" sender=${message.sender_id}`);
 
         const stats = await processUserMessage(api, database, config, message);
