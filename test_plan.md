@@ -130,13 +130,13 @@
 | 9.4 | Supersedence cross-user | Tiramisù Galadriel: dual capture superseded | 1 attivo, 1 superseded, owner=galadriel in entrambi | ✅ |
 | 9.5 | Conteggio totale | 9 fatti superseded nel DB | Init duplicates (7) + dual captures (2) | ✅ |
 
-## Phase 10 — /memory-status ⬜
+## Phase 10 — /memory-status ✅
 
 | # | Test | Come | Status |
 |---|------|------|--------|
-| 10.1 | Status command | `/memory-status` su Telegram | Report completo | ⬜ |
-| 10.2 | Active facts | Count > 0 | ⬜ |
-| 10.3 | Archived messages | Count > 0 | ⬜ |
+| 10.1 | Status command | `/memory_status` su Telegram | Report: Active:42, Superseded:9, Pending:0, Archived:72 | ✅ |
+| 10.2 | Active facts | 42 > 0 | ✅ |
+| 10.3 | Archived messages | 72 > 0 | ✅ |
 
 ---
 
@@ -286,6 +286,20 @@ Completata 2026-04-28:
 
 **Fix**: Usa `lastResolvedSender` (settato in `before_prompt_build`), stesso pattern del tool `remember` (BUG-10).
 **Commit**: `ffb53fa`
+
+#### BUG-15: Classifier gira su slash commands → spreco API ❌→✅
+
+**Root cause**: I messaggi `/dream`, `/wiki-lint`, `/wiki-sync` passavano per il classifier Gemini nel hook `message_received`. Ogni comando sprecava una chiamata API.
+
+**Fix**: Skip early in `message_received` per messaggi che iniziano con `/`.
+**Commit**: `238955c`
+
+#### BUG-16: Tool `remember` crea duplicati del classifier → supersedence inutile ❌→✅
+
+**Root cause**: Il tool `remember` (registrato da noi, NON richiesto dall'SDK) salvava in `session_captures` senza classificare. La pipeline automatica (classifier) catturava lo stesso messaggio con qualità superiore (topics Gemini, group scope, fact_type corretto). Il dream doveva poi supersedere i duplicati.
+
+**Fix**: Tool `remember` rimosso. Solo la pipeline classifier cattura fatti.
+**Commit**: `5320224`
 
 ## Dream REM manuale ✅
 
