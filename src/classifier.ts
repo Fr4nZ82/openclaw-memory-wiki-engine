@@ -69,6 +69,7 @@ export interface WindowMessage {
 export interface UserGroupInfo {
   group_id: string;
   group_name: string;
+  scope: string | null;  // JSON array describing what topics belong to this group
 }
 
 /** Known user identity (from users table) */
@@ -102,10 +103,21 @@ function buildClassifierPrompt(
     .map((m) => `[${m.role === "user" ? m.sender_name : "Assistant"}]: ${m.text}`)
     .join("\n");
 
-  // Format the user's groups
+  // Format the user's groups (with scope for disambiguation)
   const groupsText =
     userGroups.length > 0
-      ? userGroups.map((g) => `- ${g.group_id} (${g.group_name})`).join("\n")
+      ? userGroups.map((g) => {
+          let line = `- ${g.group_id} (${g.group_name})`;
+          if (g.scope) {
+            try {
+              const scopeArr = JSON.parse(g.scope) as string[];
+              if (scopeArr.length > 0) {
+                line += `\n  Scope: ${scopeArr.join("; ")}`;
+              }
+            } catch { /* ignore malformed scope */ }
+          }
+          return line;
+        }).join("\n")
       : "- no groups";
 
   // Format known users for cross-user attribution
@@ -350,7 +362,7 @@ function getUserGroups(
 ): UserGroupInfo[] {
   return db
     .prepare(
-      `SELECT g.id as group_id, g.name as group_name
+      `SELECT g.id as group_id, g.name as group_name, g.scope
        FROM user_groups g
        JOIN group_members m ON g.id = m.group_id
        WHERE m.sender_id = ?`
