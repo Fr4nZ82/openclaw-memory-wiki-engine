@@ -480,21 +480,40 @@ function register(api: any): void {
   }
 
   // -------------------------------------------------------------------
-  // Custom compaction provider
+  // Context Engine (dual-kind: memory + context-engine)
+  // Owns compaction — local truncation, no LLM summarization.
   // -------------------------------------------------------------------
 
-  if (api.registerCompactionProvider) {
-    api.registerCompactionProvider("wiki-engine-truncate", {
-      async compact(
-        messages: any[],
-        options: { keepLastAssistants?: number }
-      ): Promise<any[]> {
-        const keepTurns = options.keepLastAssistants ?? config!.keepTurns;
-        const keepMessages = keepTurns * 2;
-        return messages.slice(-keepMessages);
+  if (typeof api.registerContextEngine === "function") {
+    api.registerContextEngine("openclaw-memory-wiki-engine", () => ({
+      info: {
+        name: "openclaw-memory-wiki-engine",
+        ownsCompaction: true,
       },
-    });
-    ocLog.info("[Memory Wiki Engine] Compaction provider registered");
+
+      // No-op: message capture is handled by message_received / llm_output hooks
+      async ingest() {
+        return { ingested: true };
+      },
+
+      // Pass-through: recall context is injected by before_prompt_build hook
+      async assemble({ messages }: { messages: any[] }) {
+        return { messages, estimatedTokens: 0 };
+      },
+
+      // Local truncation: keep last keepTurns turns, drop older ones
+      async compact({ messages }: { messages?: any[] }) {
+        const keepTurns = config!.keepTurns;
+        const keepMessages = keepTurns * 2;
+        if (Array.isArray(messages) && messages.length > keepMessages) {
+          dlog(`compact(): truncating ${messages.length} → ${keepMessages} messages (keepTurns=${keepTurns})`);
+          return { messages: messages.slice(-keepMessages), compacted: true };
+        }
+        dlog(`compact(): no truncation needed (${messages?.length ?? 0} messages, keepTurns=${keepTurns})`);
+        return { messages: messages ?? [], compacted: false };
+      },
+    }));
+    ocLog.info("[Memory Wiki Engine] Context engine registered (ownsCompaction: true)");
   }
 
   // -------------------------------------------------------------------

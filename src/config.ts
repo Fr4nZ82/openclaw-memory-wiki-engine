@@ -84,7 +84,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   dreamRemTime: "03:00",
 
   // Compaction
-  keepTurns: 5,
+  keepTurns: 4,
 
   // Recall
   recallBudgetTokens: 1100,
