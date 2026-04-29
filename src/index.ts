@@ -153,7 +153,12 @@ function register(api: any): void {
 
         const messageText = event.content || event.text || "";
 
-
+        // Skip audio/media placeholders — transcription arrives later via before_prompt_build
+        const mediaPlaceholders = ["<media:audio>", "[Audio]", "<media:video>"];
+        if (mediaPlaceholders.some(p => messageText.trim().startsWith(p))) {
+          dlog(`SKIPPED media placeholder: "${messageText.trim().substring(0, 30)}"`);
+          return;
+        }
         const message: IncomingMessage = {
           text: messageText,
           sender_id: senderId,
@@ -298,22 +303,21 @@ function register(api: any): void {
           const jsonStart = raw.indexOf("```json");
           if (jsonStart === -1) return { userText: "", senderId };
 
-          // Find the LAST ``` in the text — that's the closing fence.
-          // We search from the end because the opening fence is first.
-          const lastFence = raw.lastIndexOf("```");
-          if (lastFence <= jsonStart) {
+          // Trova il PRIMO ``` di chiusura dopo il blocco json
+          const closingFence = raw.indexOf("```", jsonStart + 7);
+          if (closingFence === -1 || closingFence <= jsonStart) {
             // Only one ``` found (the opening) — no closing fence
-            dlog(`    parseEnvelopeText: no closing fence found (lastFence=${lastFence}, jsonStart=${jsonStart})`);
+            dlog(`    parseEnvelopeText: no closing fence found (closingFence=${closingFence}, jsonStart=${jsonStart})`);
             return { userText: "", senderId };
           }
 
           // Everything after the closing ``` is the user text
-          const afterFence = raw.substring(lastFence + 3).trim();
+          const afterFence = raw.substring(closingFence + 3).trim();
 
           // Debug: show the region around the closing fence
-          const fenceContext = raw.substring(Math.max(0, lastFence - 20), Math.min(raw.length, lastFence + 20))
+          const fenceContext = raw.substring(Math.max(0, closingFence - 20), Math.min(raw.length, closingFence + 20))
             .replace(/\n/g, "\\n").replace(/\r/g, "\\r");
-          dlog(`    parseEnvelopeText: lastFence=${lastFence}, afterFence="${afterFence.substring(0, 80)}...", context="${fenceContext}"`);
+          dlog(`    parseEnvelopeText: closingFence=${closingFence}, afterFence="${afterFence.substring(0, 80)}...", context="${fenceContext}"`);
 
           return { userText: afterFence, senderId };
         }
@@ -459,6 +463,26 @@ function register(api: any): void {
         lastResolvedSender = senderId;
 
         dlog(`before_prompt_build: query="${userQuery.substring(0, 50)}", sender=${senderId}, session=${sessionId}`);
+
+        // Fallback capture per trascrizioni vocali saltate da message_received
+        if (userQuery.includes("[MIC] IN") || userQuery.includes("[Audio]")) {
+          dlog(`before_prompt_build: detected voice transcription, running fallback capture`);
+          let senderName = messages[foundMsgIdx]?.metadata?.senderName || event.metadata?.senderName || "unknown";
+          processUserMessage(api, database, config, {
+            text: userQuery,
+            sender_id: senderId,
+            sender_name: senderName,
+            session_id: sessionId,
+            role: "user",
+            timestamp: new Date().toISOString(),
+          }).then(stats => {
+            if (stats.captured) {
+              ocLog.info(`[Capture Fallback] ✅ Voice transcription captured`);
+            }
+          }).catch(err => {
+            dlog(`[Capture Fallback] ERROR: ${err}`);
+          });
+        }
 
         const recallCtx = await buildRecallContext(
           database,
