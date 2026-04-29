@@ -977,7 +977,7 @@ export default {
   name: "Memory Wiki Engine",
   description:
     "Sovereign memory engine with auto-generated wiki, topic-aware classifier, and dream consolidation",
-  kind: "memory" as const,
+  kind: ["memory", "context-engine"] as const,
   configSchema: {
     type: "object",
     additionalProperties: false,
