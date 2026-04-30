@@ -556,21 +556,23 @@ function register(api: any): void {
         return { ingested: true };
       },
 
-      // Pass-through: recall context is injected by before_prompt_build hook
+      // Local truncation: keep last keepTurns turns during assembly
       async assemble({ messages }: { messages: any[] }) {
-        return { messages, estimatedTokens: 0 };
-      },
-
-      // Local truncation: keep last keepTurns turns, drop older ones
-      async compact({ messages }: { messages?: any[] }) {
         const keepTurns = config!.keepTurns;
         const keepMessages = keepTurns * 2;
+        let finalMessages = messages;
         if (Array.isArray(messages) && messages.length > keepMessages) {
-          dlog(`compact(): truncating ${messages.length} → ${keepMessages} messages (keepTurns=${keepTurns})`);
-          return { messages: messages.slice(-keepMessages), compacted: true };
+          finalMessages = messages.slice(-keepMessages);
+          dlog(`assemble(): truncating ${messages.length} → ${keepMessages} messages (keepTurns=${keepTurns})`);
         }
-        dlog(`compact(): no truncation needed (${messages?.length ?? 0} messages, keepTurns=${keepTurns})`);
-        return { messages: messages ?? [], compacted: false };
+        return { messages: finalMessages, estimatedTokens: 0 };
+      },
+
+      // Compact is called when token limits are reached, but we handle truncation statically in assemble.
+      // We return ok: true to satisfy the interface.
+      async compact({ sessionId }: { sessionId: string }) {
+        dlog(`compact() called for session ${sessionId}, but truncation is handled in assemble.`);
+        return { ok: true, compacted: true };
       },
     }));
     ocLog.info("[Memory Wiki Engine] Context engine registered (ownsCompaction: true)");
