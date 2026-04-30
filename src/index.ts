@@ -546,6 +546,7 @@ function register(api: any): void {
   if (typeof api.registerContextEngine === "function") {
     api.registerContextEngine("openclaw-memory-wiki-engine", () => ({
       info: {
+        id: "openclaw-memory-wiki-engine",
         name: "openclaw-memory-wiki-engine",
         ownsCompaction: true,
       },
