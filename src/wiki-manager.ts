@@ -1,18 +1,16 @@
 /**
- * wiki-manager.ts — Auto-generated wiki management
+ * wiki-manager.ts — Topic-driven wiki management
  *
  * Module for wiki operations beyond the automatic dream:
- *
  *   - /wiki-ingest  → digests material from the raw/ folder
- *   - /wiki-lint    → health check (stale, orphans, gaps)
+ *   - /wiki-lint    → health check (stale, empty)
  *   - /wiki-sync    → updates wiki from recent facts
  *
  * The wiki lives in ~/.openclaw/wiki-engine/wiki/ with this structure:
  *
  *   wiki/
- *   ├── entities/     — one page per person/entity
- *   ├── groups/       — one page per group (e.g. family)
- *   ├── concepts/     — one page per concept (e.g. cooking, sports)
+ *   ├── pages/        — unified flat directory for all topics
+ *   ├── .shadow/      — shadow diffs for obsidian bi-directionality
  *   └── _meta/
  *       └── topic-index.json — maps topics → pages
  */
@@ -21,13 +19,11 @@ import * as fs from "fs";
 import * as path from "path";
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
-import { jsonToTopics } from "./utils";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** Result of an ingest operation */
 export interface IngestResult {
   filesProcessed: number;
   pagesCreated: number;
@@ -35,50 +31,31 @@ export interface IngestResult {
   errors: string[];
 }
 
-/** An issue found by lint */
 export interface LintIssue {
   severity: "error" | "warning" | "info";
   page: string;
   message: string;
 }
 
-/** Lint result */
 export interface LintReport {
   totalPages: number;
   issues: LintIssue[];
   stalePages: number;
-  orphanPages: number;
   emptyPages: number;
   missingTopicIndex: boolean;
 }
 
-/** Wiki status */
 export interface WikiStatus {
   totalPages: number;
-  entitiesCount: number;
-  groupsCount: number;
-  conceptsCount: number;
   topicIndexSize: number;
   lastUpdated: string | null;
   diskSizeBytes: number;
 }
 
 // ---------------------------------------------------------------------------
-// /wiki-ingest — Digests material from the raw/ folder
+// /wiki-ingest
 // ---------------------------------------------------------------------------
 
-/**
- * Processes all files in the raw/ folder and transforms them into
- * wiki pages or facts in the database.
- *
- * Supported formats:
- *   - .md   → read directly, content extracted
- *   - .txt  → read directly
- *   - .json → parsed as array of structured facts
- *
- * Material in raw/ is NOT deleted after ingest —
- * it stays as a reference for future verification.
- */
 export async function wikiIngest(
   api: any,
   db: Database.Database,
@@ -92,7 +69,6 @@ export async function wikiIngest(
     errors: [],
   };
 
-  // Read files in the raw/ folder
   let files: string[];
   try {
     files = fs.readdirSync(config.rawPath);
@@ -101,7 +77,6 @@ export async function wikiIngest(
     return result;
   }
 
-  // Filter only supported formats
   const supportedExtensions = [".md", ".txt", ".json"];
   const targetFiles = files.filter((f) =>
     supportedExtensions.includes(path.extname(f).toLowerCase())
@@ -121,55 +96,27 @@ export async function wikiIngest(
       const ext = path.extname(fileName).toLowerCase();
 
       if (ext === ".json") {
-        // JSON: expects an array of structured facts
         await processJsonIngest(db, config, content, fileName, result, logger);
       } else {
-        // MD/TXT: extract content and create/update wiki page
-        await processTextIngest(
-          api,
-          db,
-          config,
-          content,
-          fileName,
-          result,
-          logger
-        );
+        await processTextIngest(api, db, config, content, fileName, result, logger);
       }
 
-      // Mark file as processed (append .ingested to name)
       const processedMarker = filePath + ".ingested";
       if (!fs.existsSync(processedMarker)) {
-        fs.writeFileSync(
-          processedMarker,
-          new Date().toISOString(),
-          "utf-8"
-        );
+        fs.writeFileSync(processedMarker, new Date().toISOString(), "utf-8");
       }
     } catch (error) {
       result.errors.push(`${fileName}: ${error}`);
     }
   }
 
-  // Update the topic-index after ingest
-  updateTopicIndexFromDb(db, config);
-
   logger.info(
-    `[Wiki Ingest] Complete — ${result.filesProcessed} files, ` +
-      `${result.pagesCreated} pages created, ${result.pagesUpdated} updated`
+    `[Wiki Ingest] Complete — ${result.filesProcessed} files processed`
   );
 
   return result;
 }
 
-/**
- * Processes a JSON file of structured facts.
- *
- * Expected format:
- * [
- *   { "text": "...", "fact_type": "fact", "topics": ["..."], "owner_id": "..." },
- *   ...
- * ]
- */
 async function processJsonIngest(
   db: Database.Database,
   config: PluginConfig,
@@ -187,7 +134,7 @@ async function processJsonIngest(
     return;
   }
 
-  const { generateFactId, topicsToJson } = await import("./utils");
+  const { topicsToJson } = await import("./utils");
 
   for (const fact of facts) {
     if (!fact.text) continue;
@@ -212,12 +159,6 @@ async function processJsonIngest(
   logger.info(`[Wiki Ingest] ${fileName}: ${facts.length} facts imported as captures`);
 }
 
-/**
- * Processes a text file (MD/TXT).
- *
- * Uses the LLM to extract relevant facts from text, then saves
- * them as captures that will be promoted by the dream.
- */
 async function processTextIngest(
   api: any,
   db: Database.Database,
@@ -227,45 +168,7 @@ async function processTextIngest(
   result: IngestResult,
   logger: any
 ): Promise<void> {
-  // If the file is short, save directly as a wiki concept page
-  if (content.length < 2000) {
-    const pageName = path
-      .basename(fileName, path.extname(fileName))
-      .toLowerCase()
-      .replace(/\s+/g, "_");
-    const pagePath = path.join(config.wikiPath, "concepts", `${pageName}.md`);
-
-    const now = new Date().toISOString().split("T")[0];
-    const wikiContent = [
-      "---",
-      `title: ${pageName}`,
-      `updated: ${now}`,
-      `source: raw/${fileName}`,
-      "auto_generated: true",
-      "---",
-      "",
-      `# ${pageName}`,
-      "",
-      content,
-      "",
-    ].join("\n");
-
-    const existed = fs.existsSync(pagePath);
-    fs.writeFileSync(pagePath, wikiContent, "utf-8");
-
-    if (existed) {
-      result.pagesUpdated++;
-    } else {
-      result.pagesCreated++;
-    }
-
-    logger.info(
-      `[Wiki Ingest] ${fileName} → concepts/${pageName}.md (${existed ? "updated" : "created"})`
-    );
-    return;
-  }
-
-  // For long files: use the LLM to extract facts
+  // Use the LLM to extract facts for ALL text files now
   if (api.llmTask || api.callTool) {
     const prompt = `Extract the important facts from the following text. For each fact:
 - Rephrase in third person
@@ -299,81 +202,38 @@ Respond with a JSON array:
       result.errors.push(`${fileName}: LLM extraction failed: ${error}`);
     }
   } else {
-    // No LLM available: save content as raw wiki page
-    const pageName = path
-      .basename(fileName, path.extname(fileName))
-      .toLowerCase()
-      .replace(/\s+/g, "_");
-    const pagePath = path.join(config.wikiPath, "concepts", `${pageName}.md`);
-
-    const now = new Date().toISOString().split("T")[0];
-    const wikiContent = [
-      "---",
-      `title: ${pageName}`,
-      `updated: ${now}`,
-      `source: raw/${fileName}`,
-      "auto_generated: true",
-      "confidence: low",
-      "---",
-      "",
-      `# ${pageName}`,
-      "",
-      "> Content imported from raw/ without LLM extraction. May need review.",
-      "",
-      content.substring(0, 5000),
-      "",
-    ].join("\n");
-
-    const existed = fs.existsSync(pagePath);
-    fs.writeFileSync(pagePath, wikiContent, "utf-8");
-    existed ? result.pagesUpdated++ : result.pagesCreated++;
+    result.errors.push(`${fileName}: LLM not available for extraction`);
   }
 }
 
 // ---------------------------------------------------------------------------
-// /wiki-lint — Health check
+// /wiki-lint
 // ---------------------------------------------------------------------------
 
-/**
- * Scans the wiki for problems:
- *   - Stale pages (not updated in >30 days with recent facts)
- *   - Orphan pages (no facts in DB reference them)
- *   - Empty pages (frontmatter only, no content)
- *   - Missing or empty topic-index.json
- *   - Facts without a wiki page (potential gap)
- */
-export function wikiLint(
+export async function wikiLint(
+  api: any,
   db: Database.Database,
-  config: PluginConfig
-): LintReport {
+  config: PluginConfig,
+  logger: any
+): Promise<LintReport> {
   const report: LintReport = {
     totalPages: 0,
     issues: [],
     stalePages: 0,
-    orphanPages: 0,
     emptyPages: 0,
     missingTopicIndex: false,
   };
 
-  // Scan all wiki pages
-  const wikiPages = scanWikiPages(config.wikiPath);
-  report.totalPages = wikiPages.length;
-
-  // Load all owners with active facts in the DB
-  const activeOwners = new Set<string>();
-  const ownerRows = db
-    .prepare(
-      `SELECT DISTINCT owner_type || ':' || owner_id as key
-       FROM facts WHERE is_active = 1`
-    )
-    .all() as Array<{ key: string }>;
-  for (const row of ownerRows) {
-    activeOwners.add(row.key);
+  const pagesPath = path.join(config.wikiPath, "pages");
+  if (!fs.existsSync(pagesPath)) {
+    return report;
   }
 
-  // Check each page
+  const wikiPages = scanWikiPages(pagesPath);
+  report.totalPages = wikiPages.length;
+
   for (const page of wikiPages) {
-    const filePath = path.join(config.wikiPath, page.relativePath);
+    const filePath = path.join(pagesPath, page.fileName);
     const content = fs.readFileSync(filePath, "utf-8");
 
     // Empty page?
@@ -381,14 +241,14 @@ export function wikiLint(
     if (bodyContent.length < 20) {
       report.issues.push({
         severity: "warning",
-        page: page.relativePath,
+        page: page.fileName,
         message: "Page is empty or nearly empty",
       });
       report.emptyPages++;
     }
 
     // Stale page? (check updated in frontmatter)
-    const updatedMatch = content.match(/updated:\s*(\d{4}-\d{2}-\d{2})/);
+    const updatedMatch = content.match(/updated:\s*"?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?)"?/);
     if (updatedMatch) {
       const updated = new Date(updatedMatch[1]);
       const thirtyDaysAgo = new Date();
@@ -397,22 +257,11 @@ export function wikiLint(
       if (updated < thirtyDaysAgo) {
         report.issues.push({
           severity: "info",
-          page: page.relativePath,
+          page: page.fileName,
           message: `Not updated since ${updatedMatch[1]} (>30 days)`,
         });
         report.stalePages++;
       }
-    }
-
-    // Orphan page? (no corresponding owner in DB)
-    const ownerKey = inferOwnerFromPath(page.relativePath);
-    if (ownerKey && !activeOwners.has(ownerKey)) {
-      report.issues.push({
-        severity: "warning",
-        page: page.relativePath,
-        message: `Orphan — no active facts for ${ownerKey}`,
-      });
-      report.orphanPages++;
     }
   }
 
@@ -444,41 +293,13 @@ export function wikiLint(
     }
   }
 
-  // Facts without wiki page (gap)
-  for (const ownerKey of activeOwners) {
-    const hasPage = wikiPages.some(
-      (p) => inferOwnerFromPath(p.relativePath) === ownerKey
-    );
-    if (!hasPage) {
-      const [ownerType, ownerId] = ownerKey.split(":");
-      const factCount = db
-        .prepare(
-          `SELECT COUNT(*) as c FROM facts
-           WHERE is_active = 1 AND owner_type = ? AND owner_id = ?`
-        )
-        .get(ownerType, ownerId) as { c: number };
-
-      // Only report if there are enough facts for a page
-      if (factCount.c >= 3) {
-        report.issues.push({
-          severity: "info",
-          page: `(missing)`,
-          message: `${ownerId} has ${factCount.c} active facts but no wiki page`,
-        });
-      }
-    }
-  }
-
   return report;
 }
 
 // ---------------------------------------------------------------------------
-// /wiki-sync — Updates wiki from recent facts
+// /wiki-sync
 // ---------------------------------------------------------------------------
 
-/**
- * Incremental wiki update based on recent facts.
- */
 export async function wikiSync(
   api: any,
   db: Database.Database,
@@ -493,100 +314,29 @@ export async function wikiSync(
 }
 
 // ---------------------------------------------------------------------------
-// Archive search
+// /wiki-status
 // ---------------------------------------------------------------------------
 
-/**
- * Searches raw transcripts in the session archive.
- * Uses FTS5 for full-text search. Last-resort fallback
- * when facts and wiki have no results.
- */
-export function searchArchive(
-  db: Database.Database,
-  query: string,
-  limit: number = 10
-): Array<{
-  session_id: string;
-  sender_name: string | null;
-  message_text: string;
-  role: string;
-  timestamp: string;
-}> {
-  // Prepare FTS query
-  const ftsQuery = query
-    .replace(/[^\w\s]/g, "")
-    .split(/\s+/)
-    .filter((w) => w.length > 2)
-    .join(" OR ");
-
-  if (!ftsQuery) return [];
-
-  try {
-    return db
-      .prepare(
-        `SELECT a.session_id, a.sender_name, a.message_text, a.role, a.timestamp
-         FROM archive_fts
-         JOIN session_archive a ON archive_fts.rowid = a.rowid
-         WHERE archive_fts MATCH ?
-         ORDER BY bm25(archive_fts)
-         LIMIT ?`
-      )
-      .all(ftsQuery, limit) as Array<{
-      session_id: string;
-      sender_name: string | null;
-      message_text: string;
-      role: string;
-      timestamp: string;
-    }>;
-  } catch {
-    // Malformed FTS query, fallback to LIKE
-    return db
-      .prepare(
-        `SELECT session_id, sender_name, message_text, role, timestamp
-         FROM session_archive
-         WHERE message_text LIKE ?
-         ORDER BY timestamp DESC
-         LIMIT ?`
-      )
-      .all(`%${query}%`, limit) as Array<{
-      session_id: string;
-      sender_name: string | null;
-      message_text: string;
-      role: string;
-      timestamp: string;
-    }>;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Wiki status
-// ---------------------------------------------------------------------------
-
-/**
- * Returns the current wiki status.
- */
 export function getWikiStatus(
   config: PluginConfig
 ): WikiStatus {
   const status: WikiStatus = {
     totalPages: 0,
-    entitiesCount: 0,
-    groupsCount: 0,
-    conceptsCount: 0,
     topicIndexSize: 0,
     lastUpdated: null,
     diskSizeBytes: 0,
   };
 
-  const pages = scanWikiPages(config.wikiPath);
+  const pagesPath = path.join(config.wikiPath, "pages");
+  if (!fs.existsSync(pagesPath)) {
+    return status;
+  }
+
+  const pages = scanWikiPages(pagesPath);
   status.totalPages = pages.length;
 
   for (const page of pages) {
-    const filePath = path.join(config.wikiPath, page.relativePath);
-
-    if (page.relativePath.startsWith("entities/")) status.entitiesCount++;
-    else if (page.relativePath.startsWith("groups/")) status.groupsCount++;
-    else if (page.relativePath.startsWith("concepts/")) status.conceptsCount++;
+    const filePath = path.join(pagesPath, page.fileName);
 
     try {
       const stat = fs.statSync(filePath);
@@ -610,35 +360,76 @@ export function getWikiStatus(
 }
 
 // ---------------------------------------------------------------------------
+// searchArchive
+// ---------------------------------------------------------------------------
+
+export function searchArchive(
+  db: Database.Database,
+  query: string,
+  limit: number = 10
+): Array<{
+  session_id: string;
+  sender_name: string | null;
+  message_text: string;
+  role: string;
+  timestamp: string;
+}> {
+  const ftsQuery = query
+    .replace(/[^\w\s]/g, "")
+    .split(/\s+/)
+    .filter((w) => w.length > 2)
+    .join(" OR ");
+
+  if (!ftsQuery) return [];
+
+  try {
+    return db
+      .prepare(
+        `SELECT a.session_id, a.sender_name, a.message_text, a.role, a.timestamp
+         FROM archive_fts
+         JOIN session_archive a ON archive_fts.rowid = a.rowid
+         WHERE archive_fts MATCH ?
+         ORDER BY bm25(archive_fts)
+         LIMIT ?`
+      )
+      .all(ftsQuery, limit) as Array<any>;
+  } catch {
+    return db
+      .prepare(
+        `SELECT session_id, sender_name, message_text, role, timestamp
+         FROM session_archive
+         WHERE message_text LIKE ?
+         ORDER BY timestamp DESC
+         LIMIT ?`
+      )
+      .all(`%${query}%`, limit) as Array<any>;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Type for a found wiki page */
 interface WikiPageInfo {
   relativePath: string;
   fileName: string;
 }
 
-/**
- * Recursively scans the wiki folder for .md pages.
- * Ignores _meta/ and hidden files.
- */
-function scanWikiPages(wikiPath: string): WikiPageInfo[] {
+function scanWikiPages(dir: string): WikiPageInfo[] {
   const pages: WikiPageInfo[] = [];
 
-  function scan(dir: string, prefix: string): void {
+  function scan(currentDir: string, prefix: string): void {
     let entries: string[];
     try {
-      entries = fs.readdirSync(dir);
+      entries = fs.readdirSync(currentDir);
     } catch {
       return;
     }
 
     for (const entry of entries) {
-      // Ignore _meta and hidden files
       if (entry.startsWith("_") || entry.startsWith(".")) continue;
 
-      const fullPath = path.join(dir, entry);
+      const fullPath = path.join(currentDir, entry);
       const relativePath = prefix ? `${prefix}/${entry}` : entry;
 
       try {
@@ -652,143 +443,6 @@ function scanWikiPages(wikiPath: string): WikiPageInfo[] {
     }
   }
 
-  scan(wikiPath, "");
+  scan(dir, "");
   return pages;
-}
-
-/**
- * Infers owner_type:owner_id from a wiki page path.
- *
- * entities/alice.md → "user:alice"
- * groups/family.md → "group:family"
- * concepts/cooking.md → "global:cooking"
- */
-function inferOwnerFromPath(relativePath: string): string | null {
-  const parts = relativePath.split("/");
-  if (parts.length < 2) return null;
-
-  const dir = parts[0];
-  const name = path.basename(parts[parts.length - 1], ".md");
-
-  const typeMap: Record<string, string> = {
-    entities: "user",
-    groups: "group",
-    concepts: "global",
-  };
-
-  const ownerType = typeMap[dir];
-  if (!ownerType) return null;
-
-  return `${ownerType}:${name}`;
-}
-
-/**
- * Updates topic-index.json from the database.
- * Identical to the function in dream, extracted here for reuse.
- */
-function updateTopicIndexFromDb(
-  db: Database.Database,
-  config: PluginConfig
-): void {
-  const facts = db
-    .prepare(
-      `SELECT DISTINCT topics, owner_type, owner_id FROM facts
-       WHERE is_active = 1`
-    )
-    .all() as Array<{
-    topics: string;
-    owner_type: string;
-    owner_id: string;
-  }>;
-
-  const index: Record<string, string[]> = {};
-
-  for (const fact of facts) {
-    const topics = jsonToTopics(fact.topics);
-    const subDir =
-      fact.owner_type === "group"
-        ? "groups"
-        : fact.owner_type === "global"
-          ? "concepts"
-          : "entities";
-    const fileName = `${fact.owner_id.toLowerCase().replace(/\s+/g, "_")}.md`;
-    const pagePath = `${subDir}/${fileName}`;
-
-    for (const topic of topics) {
-      const pages = index[topic] || [];
-      if (!pages.includes(pagePath)) {
-        pages.push(pagePath);
-      }
-      index[topic] = pages;
-    }
-  }
-
-  const metaDir = path.join(config.wikiPath, "_meta");
-  fs.mkdirSync(metaDir, { recursive: true });
-  const indexPath = path.join(metaDir, "topic-index.json");
-  fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf-8");
-
-  // Genera index.md
-  generateHumanIndex(config);
-}
-
-/**
- * Generates the human-readable index.md file from the topic-index.json.
- * Extracts the "description" from the frontmatter of each markdown file to use as a summary.
- */
-function generateHumanIndex(config: PluginConfig): void {
-  const indexPath = path.join(config.wikiPath, "_meta", "topic-index.json");
-  if (!fs.existsSync(indexPath)) return;
-
-  const topicIndex: Record<string, string[]> = JSON.parse(fs.readFileSync(indexPath, "utf-8"));
-  
-  const lines: string[] = [
-    `---`,
-    `title: Wiki Index`,
-    `updated: ${new Date().toISOString().split("T")[0]}`,
-    `auto_generated: true`,
-    `---`,
-    ``,
-    `# Indice dei Contenuti`,
-    `_Questo file è generato automaticamente dal Wiki Compiler._`,
-    ``,
-  ];
-
-  for (const [topic, pages] of Object.entries(topicIndex).sort()) {
-    // Escludi i topic blacklisted operativi
-    if (["chat", "general", "saluto", "sistema", "debug", "wiki_edit"].includes(topic)) continue;
-
-    lines.push(`## Topic: ${topic}`);
-    
-    for (const pagePath of pages) {
-      const fullPath = path.join(config.wikiPath, pagePath);
-      const slug = path.basename(pagePath, ".md");
-      let desc = "Nessuna descrizione";
-      let title = slug;
-      
-      const content = safeReadFile(fullPath);
-      if (content) {
-        const descMatch = content.match(/^description:\s*["']?([^"'\n]+)["']?/m);
-        if (descMatch) desc = descMatch[1];
-        
-        const titleMatch = content.match(/^title:\s*["']?([^"'\n]+)["']?/m);
-        if (titleMatch) title = titleMatch[1];
-      }
-      
-      lines.push(`- [[${slug}|${title}]] - *${desc}*`);
-    }
-    lines.push("");
-  }
-
-  const humanIndexPath = path.join(config.wikiPath, "index.md");
-  fs.writeFileSync(humanIndexPath, lines.join("\n"), "utf-8");
-}
-
-/** Reads a file safely (null if not found) */
-function safeReadFile(filePath: string): string | null {
-  try {
-    return fs.readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
 }

@@ -694,10 +694,7 @@ function register(api: any): void {
 
         const text = [
           "📖 Wiki Status",
-          `- Total pages: ${status.totalPages}`,
-          `  - Entities: ${status.entitiesCount}`,
-          `  - Groups: ${status.groupsCount}`,
-          `  - Concepts: ${status.conceptsCount}`,
+          `- Total Topic Pages: ${status.totalPages}`,
           `- Indexed topics: ${status.topicIndexSize}`,
           `- Last updated: ${status.lastUpdated || "never"}`,
           `- Disk size: ${(status.diskSizeBytes / 1024).toFixed(1)} KB`,
