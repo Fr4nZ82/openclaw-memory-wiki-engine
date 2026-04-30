@@ -484,12 +484,16 @@ export function wikiLint(
  *   - Only updates pages for owners with recently modified facts
  *   - Faster, designed for manual use
  */
-export function wikiSync(
+export async function wikiSync(
+  api: any,
   db: Database.Database,
   config: PluginConfig,
   logger: any
-): { pagesUpdated: number; topicIndexUpdated: boolean } {
+): Promise<{ pagesUpdated: number; topicIndexUpdated: boolean }> {
   let pagesUpdated = 0;
+
+  const { syncHumanEdits, semanticMergePage } = await import("./wiki-compiler");
+  await syncHumanEdits(api, db, config, logger);
 
   // Find owners with facts modified in the last 24h
   const recentOwners = db
@@ -502,7 +506,25 @@ export function wikiSync(
     .all() as Array<{ owner_type: string; owner_id: string }>;
 
   for (const owner of recentOwners) {
-    const updated = syncOwnerPage(db, config, owner, logger);
+    const ownerObj = {
+      owner_type: owner.owner_type,
+      owner_id: owner.owner_id,
+      title: owner.owner_id,
+    };
+
+    // Load facts
+    const facts = db
+      .prepare(
+        `SELECT text, fact_type, topics, confidence, updated_at
+         FROM facts
+         WHERE is_active = 1 AND owner_type = ? AND owner_id = ?
+         ORDER BY fact_type, updated_at DESC`
+      )
+      .all(owner.owner_type, owner.owner_id);
+
+    if (facts.length === 0) continue;
+
+    const updated = await semanticMergePage(api, config, ownerObj, facts, logger);
     if (updated) pagesUpdated++;
   }
 
@@ -514,93 +536,6 @@ export function wikiSync(
   );
 
   return { pagesUpdated, topicIndexUpdated: true };
-}
-
-/**
- * Regenerates the wiki page for a single owner.
- * Reuses the same logic as the dream but for a specific owner.
- */
-function syncOwnerPage(
-  db: Database.Database,
-  config: PluginConfig,
-  owner: { owner_type: string; owner_id: string },
-  logger: any
-): boolean {
-  const subDir =
-    owner.owner_type === "group"
-      ? "groups"
-      : owner.owner_type === "global"
-        ? "concepts"
-        : "entities";
-  const fileName = `${owner.owner_id.toLowerCase().replace(/\s+/g, "_")}.md`;
-  const filePath = path.join(config.wikiPath, subDir, fileName);
-
-  // Load facts
-  const facts = db
-    .prepare(
-      `SELECT text, fact_type, topics, confidence, updated_at
-       FROM facts
-       WHERE is_active = 1 AND owner_type = ? AND owner_id = ?
-       ORDER BY fact_type, updated_at DESC`
-    )
-    .all(owner.owner_type, owner.owner_id) as Array<{
-    text: string;
-    fact_type: string;
-    topics: string;
-    confidence: number;
-    updated_at: string;
-  }>;
-
-  if (facts.length === 0) return false;
-
-  // Generate markdown content
-  const now = new Date().toISOString().split("T")[0];
-  const lines: string[] = [
-    `---`,
-    `title: ${owner.owner_id}`,
-    `updated: ${now}`,
-    `owner_type: ${owner.owner_type}`,
-    `auto_generated: true`,
-    `---`,
-    ``,
-    `# ${owner.owner_id}`,
-    ``,
-  ];
-
-  // Group by fact_type
-  const grouped: Record<string, typeof facts> = {};
-  for (const fact of facts) {
-    (grouped[fact.fact_type] ??= []).push(fact);
-  }
-
-  const sectionMap: Record<string, string> = {
-    rule: "Rules",
-    preference: "Preferences",
-    fact: "Facts",
-    episode: "Recent episodes",
-  };
-
-  for (const [factType, title] of Object.entries(sectionMap)) {
-    if (grouped[factType]) {
-      lines.push(`## ${title}`);
-      for (const fact of grouped[factType]) {
-        const suffix = factType === "episode" ? ` _(${fact.updated_at})_` : "";
-        lines.push(`- ${fact.text}${suffix}`);
-      }
-      lines.push(``);
-    }
-  }
-
-  const content = lines.join("\n");
-  const existingContent = safeReadFile(filePath);
-
-  if (existingContent !== content) {
-    fs.writeFileSync(filePath, content, "utf-8");
-    logger.info(`[Wiki Sync] ${subDir}/${fileName} updated`);
-    return true;
-  }
-
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -838,6 +773,61 @@ function updateTopicIndexFromDb(
   fs.mkdirSync(metaDir, { recursive: true });
   const indexPath = path.join(metaDir, "topic-index.json");
   fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf-8");
+
+  // Genera index.md
+  generateHumanIndex(config);
+}
+
+/**
+ * Generates the human-readable index.md file from the topic-index.json.
+ * Extracts the "description" from the frontmatter of each markdown file to use as a summary.
+ */
+function generateHumanIndex(config: PluginConfig): void {
+  const indexPath = path.join(config.wikiPath, "_meta", "topic-index.json");
+  if (!fs.existsSync(indexPath)) return;
+
+  const topicIndex: Record<string, string[]> = JSON.parse(fs.readFileSync(indexPath, "utf-8"));
+  
+  const lines: string[] = [
+    `---`,
+    `title: Wiki Index`,
+    `updated: ${new Date().toISOString().split("T")[0]}`,
+    `auto_generated: true`,
+    `---`,
+    ``,
+    `# Indice dei Contenuti`,
+    `_Questo file è generato automaticamente dal Wiki Compiler._`,
+    ``,
+  ];
+
+  for (const [topic, pages] of Object.entries(topicIndex).sort()) {
+    // Escludi i topic blacklisted operativi
+    if (["chat", "general", "saluto", "sistema", "debug", "wiki_edit"].includes(topic)) continue;
+
+    lines.push(`## Topic: ${topic}`);
+    
+    for (const pagePath of pages) {
+      const fullPath = path.join(config.wikiPath, pagePath);
+      const slug = path.basename(pagePath, ".md");
+      let desc = "Nessuna descrizione";
+      let title = slug;
+      
+      const content = safeReadFile(fullPath);
+      if (content) {
+        const descMatch = content.match(/^description:\s*["']?([^"'\n]+)["']?/m);
+        if (descMatch) desc = descMatch[1];
+        
+        const titleMatch = content.match(/^title:\s*["']?([^"'\n]+)["']?/m);
+        if (titleMatch) title = titleMatch[1];
+      }
+      
+      lines.push(`- [[${slug}|${title}]] - *${desc}*`);
+    }
+    lines.push("");
+  }
+
+  const humanIndexPath = path.join(config.wikiPath, "index.md");
+  fs.writeFileSync(humanIndexPath, lines.join("\n"), "utf-8");
 }
 
 /** Reads a file safely (null if not found) */

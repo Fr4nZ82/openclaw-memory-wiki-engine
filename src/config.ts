@@ -49,6 +49,9 @@ export interface PluginConfig {
   /** Number of facts to return in hybrid search */
   recallTopK: number;
 
+  /** Auto-dream trigger if pending captures exceed this threshold */
+  dreamCaptureThreshold: number;
+
   /** Vector component weight in hybrid search (0-1) */
   vectorWeight: number;
 
@@ -87,9 +90,10 @@ export const DEFAULT_CONFIG: PluginConfig = {
   keepTurns: 4,
 
   // Recall
-  recallBudgetTokens: 1100,
+  recallBudgetTokens: 4000,
   classifierWindowSize: 4,
-  recallTopK: 5,
+  recallTopK: 10,
+  dreamCaptureThreshold: 15, // Trigger auto-dream se i captures non processati superano questo limite
 
   // Hybrid search weights
   vectorWeight: 0.7,

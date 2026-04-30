@@ -281,8 +281,8 @@ export function initDatabase(config: PluginConfig): Database.Database {
   fs.mkdirSync(config.wikiPath, { recursive: true });
   fs.mkdirSync(config.rawPath, { recursive: true });
 
-  // Create wiki subdirectories
-  for (const sub of ["entities", "groups", "concepts", "_meta"]) {
+  // Create wiki subdirectories (Topic-Driven)
+  for (const sub of ["pages", ".shadow", "_meta"]) {
     fs.mkdirSync(path.join(config.wikiPath, sub), { recursive: true });
   }
 

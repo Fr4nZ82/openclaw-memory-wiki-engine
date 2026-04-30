@@ -133,6 +133,7 @@ export async function dreamLight(
  * plus de-duplication, decay, wiki, MEMORY.md, and archive.
  */
 export async function dreamRem(
+  api: any,
   db: Database.Database,
   config: PluginConfig,
   logger: any
@@ -159,17 +160,12 @@ export async function dreamRem(
 
   // Phase 4: wiki update
   try {
-    report.wikiPagesUpdated = await updateWikiPages(db, config, logger);
+    report.wikiPagesUpdated = await updateWikiPages(api, db, config, logger);
   } catch (error) {
     report.errors.push(`Wiki update: ${error}`);
   }
 
-  // Phase 5: MEMORY.md update
-  try {
-    report.memoryMdUpdated = updateMemoryMd(db, config, logger);
-  } catch (error) {
-    report.errors.push(`MEMORY.md: ${error}`);
-  }
+  // Phase 5 removed: MEMORY.md is deprecated in favor of the Wiki
 
   // Phase 6: archive compression
   try {
@@ -384,33 +380,60 @@ function decayConfidence(db: Database.Database, logger: any): number {
  *   - Group: on first owner_type=group fact → create page
  */
 async function updateWikiPages(
+  api: any,
   db: Database.Database,
   config: PluginConfig,
   logger: any
 ): Promise<number> {
+  const { syncHumanEdits, semanticMergePage } = await import("./wiki-compiler");
   let pagesUpdated = 0;
 
-  // Find owners with enough facts for a wiki page
-  const owners = db
-    .prepare(
-      `SELECT owner_type, owner_id,
-              COUNT(*) as fact_count,
-              SUM(CASE WHEN fact_type = 'rule' THEN 1 ELSE 0 END) as rule_count
-       FROM facts
-       WHERE is_active = 1
-       GROUP BY owner_type, owner_id
-       HAVING fact_count >= 3 OR rule_count >= 1`
-    )
-    .all() as Array<{
-    owner_type: string;
-    owner_id: string;
-    fact_count: number;
-    rule_count: number;
-  }>;
+  // 1. Sync human edits from shadow diff
+  try {
+    const edits = await syncHumanEdits(api, db, config, logger);
+    if (edits > 0) {
+      logger.info(`[Dream REM] Synced ${edits} human edits from wiki shadow copies`);
+    }
+  } catch (error) {
+    logger.error(`[Dream REM] Error syncing human edits: ${error}`);
+  }
 
-  for (const owner of owners) {
-    const updated = generateWikiPage(db, config, owner, logger);
-    if (updated) pagesUpdated++;
+  // 2. Find all unique topics with enough facts
+  // We extract all active facts, expand their topics array, and count.
+  const allFacts = db.prepare(`SELECT * FROM facts WHERE is_active = 1 ORDER BY fact_type, updated_at DESC`).all() as Fact[];
+  const topicStats: Record<string, { fact_count: number; rule_count: number; owner_ids: Set<string> }> = {};
+  
+  for (const f of allFacts) {
+    const tList = jsonToTopics(f.topics);
+    for (const t of tList) {
+      const topicLower = t.toLowerCase();
+      // Exclude operational blacklist topics
+      if (["general", "chat", "saluto", "sistema", "debug"].includes(topicLower)) continue;
+      
+      if (!topicStats[topicLower]) topicStats[topicLower] = { fact_count: 0, rule_count: 0, owner_ids: new Set() };
+      topicStats[topicLower].fact_count++;
+      if (f.fact_type === "rule") topicStats[topicLower].rule_count++;
+      topicStats[topicLower].owner_ids.add(f.owner_id);
+    }
+  }
+
+  for (const [topic, stats] of Object.entries(topicStats)) {
+    // Thresholds: 3+ facts OR 1+ rule OR 2+ distinct owners
+    if (stats.fact_count >= 3 || stats.rule_count >= 1 || stats.owner_ids.size >= 2) {
+      // Load facts for this topic
+      const factsForTopic = allFacts.filter(f => {
+        const lowerTopics = jsonToTopics(f.topics).map(t => t.toLowerCase());
+        return lowerTopics.includes(topic);
+      });
+      
+      const pageTitle = topic.charAt(0).toUpperCase() + topic.slice(1);
+      
+      // Pass the target object as { topic, title } instead of the old owner structure
+      const targetEntity = { topic, title: pageTitle };
+      
+      const updated = await semanticMergePage(api, config, targetEntity, factsForTopic, logger);
+      if (updated) pagesUpdated++;
+    }
   }
 
   // Update the topic index
@@ -419,172 +442,6 @@ async function updateWikiPages(
   return pagesUpdated;
 }
 
-/**
- * Generates (or updates) a wiki page for an owner.
- */
-function generateWikiPage(
-  db: Database.Database,
-  config: PluginConfig,
-  owner: { owner_type: string; owner_id: string },
-  logger: any
-): boolean {
-  // Determine page path
-  const subDir =
-    owner.owner_type === "group"
-      ? "groups"
-      : owner.owner_type === "global"
-        ? "concepts"
-        : "entities";
-  const fileName = `${owner.owner_id.toLowerCase().replace(/\s+/g, "_")}.md`;
-  const filePath = path.join(config.wikiPath, subDir, fileName);
-
-  // Load facts for this owner
-  const facts = db
-    .prepare(
-      `SELECT text, fact_type, topics, confidence, created_at, updated_at
-       FROM facts
-       WHERE is_active = 1
-         AND owner_type = ?
-         AND owner_id = ?
-       ORDER BY fact_type, updated_at DESC`
-    )
-    .all(owner.owner_type, owner.owner_id) as Array<{
-    text: string;
-    fact_type: string;
-    topics: string;
-    confidence: number;
-    created_at: string;
-    updated_at: string;
-  }>;
-
-  if (facts.length === 0) return false;
-
-  // Generate markdown content
-  const now = new Date().toISOString().split("T")[0];
-
-  // Resolve human-readable title for entities from users table
-  let pageTitle = owner.owner_id;
-  if (owner.owner_type === "user") {
-    const userRow = db
-      .prepare(`SELECT names FROM users WHERE sender_id = ?`)
-      .get(owner.owner_id) as { names: string } | undefined;
-    if (userRow) {
-      try {
-        const names = JSON.parse(userRow.names) as string[];
-        if (names.length > 0) pageTitle = names[0]; // canonical name
-      } catch {
-        // invalid JSON, use owner_id
-      }
-    }
-  }
-
-  const lines: string[] = [
-    `---`,
-    `title: ${pageTitle}`,
-    `updated: ${now}`,
-    `owner_type: ${owner.owner_type}`,
-    `auto_generated: true`,
-    `---`,
-    ``,
-    `# ${pageTitle}`,
-    ``,
-  ];
-
-  // For groups: add a "Scope" section from user_groups.scope
-  // This describes what types of facts belong to this group
-  // vs individual profiles — guides the classifier and the user.
-  if (owner.owner_type === "group") {
-    const groupRow = db
-      .prepare(`SELECT name, description, scope FROM user_groups WHERE id = ?`)
-      .get(owner.owner_id) as
-      | { name: string; description: string | null; scope: string | null }
-      | undefined;
-
-    if (groupRow) {
-      lines[lines.indexOf(`# ${owner.owner_id}`)] = `# ${groupRow.name}`;
-
-      if (groupRow.description) {
-        lines.push(`> ${groupRow.description}`);
-        lines.push(``);
-      }
-
-      if (groupRow.scope) {
-        try {
-          const scopeItems = JSON.parse(groupRow.scope) as string[];
-          if (scopeItems.length > 0) {
-            lines.push(`## Scope — cosa appartiene a questo gruppo`);
-            for (const item of scopeItems) {
-              lines.push(`- ${item}`);
-            }
-            lines.push(``);
-            lines.push(
-              `> Tutto ciò che NON rientra nello scope va nei profili individuali.`
-            );
-            lines.push(``);
-          }
-        } catch {
-          // scope non è JSON valido, skip
-        }
-      }
-    }
-  }
-
-  // Group by fact_type
-  const grouped: Record<string, typeof facts> = {};
-  for (const fact of facts) {
-    const group = grouped[fact.fact_type] || [];
-    group.push(fact);
-    grouped[fact.fact_type] = group;
-  }
-
-  // Rules first (most important)
-  if (grouped["rule"]) {
-    lines.push(`## Rules`);
-    for (const fact of grouped["rule"]) {
-      lines.push(`- ${fact.text}`);
-    }
-    lines.push(``);
-  }
-
-  // Preferences
-  if (grouped["preference"]) {
-    lines.push(`## Preferences`);
-    for (const fact of grouped["preference"]) {
-      lines.push(`- ${fact.text}`);
-    }
-    lines.push(``);
-  }
-
-  // Facts
-  if (grouped["fact"]) {
-    lines.push(`## Facts`);
-    for (const fact of grouped["fact"]) {
-      lines.push(`- ${fact.text}`);
-    }
-    lines.push(``);
-  }
-
-  // Episodes (temporary)
-  if (grouped["episode"]) {
-    lines.push(`## Recent episodes`);
-    for (const fact of grouped["episode"]) {
-      lines.push(`- ${fact.text} _(${fact.updated_at})_`);
-    }
-    lines.push(``);
-  }
-
-  // Write the file
-  const content = lines.join("\n");
-  const existingContent = safeReadFile(filePath);
-
-  if (existingContent !== content) {
-    fs.writeFileSync(filePath, content, "utf-8");
-    logger.info(`[Dream REM] Wiki: ${subDir}/${fileName} updated`);
-    return true;
-  }
-
-  return false; // No changes needed
-}
 
 /**
  * Updates topic-index.json — maps topics → wiki pages.
@@ -594,32 +451,23 @@ function updateTopicIndex(
   db: Database.Database,
   config: PluginConfig
 ): void {
-  // Load all active facts grouped by topic
+  // Load all active facts' topics
   const facts = db
-    .prepare(
-      `SELECT DISTINCT topics, owner_type, owner_id FROM facts
-       WHERE is_active = 1`
-    )
-    .all() as Array<{
-    topics: string;
-    owner_type: string;
-    owner_id: string;
-  }>;
+    .prepare(`SELECT DISTINCT topics FROM facts WHERE is_active = 1`)
+    .all() as Array<{ topics: string; }>;
 
   const index: Record<string, string[]> = {};
 
   for (const fact of facts) {
     const topics = jsonToTopics(fact.topics);
-    const subDir =
-      fact.owner_type === "group"
-        ? "groups"
-        : fact.owner_type === "global"
-          ? "concepts"
-          : "entities";
-    const fileName = `${fact.owner_id.toLowerCase().replace(/\s+/g, "_")}.md`;
-    const pagePath = `${subDir}/${fileName}`;
 
-    for (const topic of topics) {
+    for (const rawTopic of topics) {
+      const topic = rawTopic.toLowerCase();
+      if (["general", "chat", "saluto", "sistema", "debug"].includes(topic)) continue;
+
+      const fileName = `${topic.replace(/[^a-z0-9]+/g, "_")}.md`;
+      const pagePath = `pages/${fileName}`;
+
       const pages = index[topic] || [];
       if (!pages.includes(pagePath)) {
         pages.push(pagePath);
@@ -632,66 +480,7 @@ function updateTopicIndex(
   fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf-8");
 }
 
-// ---------------------------------------------------------------------------
-// MEMORY.md
-// ---------------------------------------------------------------------------
-
-/**
- * Updates MEMORY.md with operational rules.
- * Only facts with fact_type="rule" are included.
- */
-function updateMemoryMd(
-  db: Database.Database,
-  config: PluginConfig,
-  logger: any
-): boolean {
-  const rules = db
-    .prepare(
-      `SELECT text, owner_id, updated_at FROM facts
-       WHERE is_active = 1 AND fact_type = 'rule'
-       ORDER BY owner_id, updated_at DESC`
-    )
-    .all() as Array<{ text: string; owner_id: string; updated_at: string }>;
-
-  if (rules.length === 0) return false;
-
-  const lines: string[] = [
-    `# MEMORY.md — Operational rules`,
-    ``,
-    `> Auto-generated by the Dream REM engine. Do not edit manually.`,
-    `> Last updated: ${new Date().toISOString().split("T")[0]}`,
-    ``,
-  ];
-
-  // Group by owner
-  const byOwner: Record<string, Array<{ text: string; updated_at: string }>> =
-    {};
-  for (const rule of rules) {
-    const group = byOwner[rule.owner_id] || [];
-    group.push(rule);
-    byOwner[rule.owner_id] = group;
-  }
-
-  for (const [ownerId, ownerRules] of Object.entries(byOwner)) {
-    lines.push(`## ${ownerId}`);
-    for (const rule of ownerRules) {
-      lines.push(`- ${rule.text}`);
-    }
-    lines.push(``);
-  }
-
-  const content = lines.join("\n");
-  const memoryPath = path.join(path.dirname(config.dbPath), "MEMORY.md");
-  const existing = safeReadFile(memoryPath);
-
-  if (existing !== content) {
-    fs.writeFileSync(memoryPath, content, "utf-8");
-    logger.info("[Dream REM] MEMORY.md updated");
-    return true;
-  }
-
-  return false;
-}
+// MEMORY.md logic has been completely removed in V2 architecture
 
 // ---------------------------------------------------------------------------
 // Archive compression
@@ -719,7 +508,22 @@ function compressOldArchive(db: Database.Database, logger: any): number {
     );
   }
 
-  return result.changes;
+  // Cleanup old session captures (promoted or internal) to prevent indefinite growth
+  const captureResult = db
+    .prepare(
+      `DELETE FROM session_captures
+       WHERE (promoted = 1 OR is_internal = 1)
+         AND captured_at < datetime('now', '-7 days')`
+    )
+    .run();
+
+  if (captureResult.changes > 0) {
+    logger.info(
+      `[Dream REM] Cleanup: ${captureResult.changes} old captures removed`
+    );
+  }
+
+  return result.changes + captureResult.changes;
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +535,7 @@ function getPendingCaptures(db: Database.Database): SessionCapture[] {
   return db
     .prepare(
       `SELECT * FROM session_captures
-       WHERE promoted = 0
+       WHERE promoted = 0 AND is_internal = 0
        ORDER BY captured_at ASC`
     )
     .all() as SessionCapture[];

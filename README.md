@@ -12,7 +12,6 @@ Instead of dumping everything into a flat memory store, this plugin **classifies
 - **Auto-generated wiki** — entity/group/concept pages created and updated automatically from accumulated facts
 - **Dream consolidation** — lightweight (every 6h) and deep REM (nightly) cycles for fact promotion, supersedence, deduplication, and confidence decay
 - **Supersedence** — new facts automatically override contradicted old ones (never deleted, just marked inactive)
-- **MEMORY.md** — auto-generated operational rules file for quick agent reference
 - **SQLite-based** — single `engine.db` file with FTS5, vector columns, and migration system
 - **Graceful degradation** — works without Ollama (falls back to keyword search)
 
@@ -33,7 +32,6 @@ Message → Archive → Classifier → Capture
 | Wiki | Structured pages per entity/group/concept | `wiki/` filesystem |
 | Facts DB | Permanent knowledge with embeddings | `facts` table |
 | Captures | Pre-promotion classified snippets | `session_captures` table |
-| MEMORY.md | Operational rules (auto-generated) | filesystem |
 | Archive | Raw message log with FTS5 | `session_archive` table |
 
 ## Installation
@@ -261,40 +259,38 @@ The plugin registers these tools for the agent:
 ### Dream engine
 
 - **Light dream** (every 6h): promotes captures to permanent facts, generates embeddings, checks supersedence
-- **REM dream** (nightly at 03:00): deduplication (cosine > 0.85), confidence decay (>90 days unused), wiki page generation, MEMORY.md update, archive compression (>6 months)
+- **REM dream** (nightly at 03:00): deduplication (cosine > 0.85), confidence decay (>90 days unused), **Shadow Diff** (extracts human edits from Obsidian), **Wiki Compiler** (Semantic Merge of facts into prose with ACL tags), archive compression (>6 months)
 
 ### Recall (context injection)
 
 Before each prompt, the plugin injects relevant context with 5 priority layers:
 
-1. **MEMORY.md** — operational rules (always loaded)
-2. **Routing hints** — skill/action routing cues
-3. **Wiki pages** — matching entity/concept pages
-4. **Hybrid search** — BM25 + vector results from facts
-5. **Session captures** — current session context
+1. **Routing hints** — skill/action routing cues
+2. **Wiki pages** — matching entity/concept pages
+3. **Hybrid search** — BM25 + vector results from facts
+4. **Session captures** — current session context
 
 Total budget is ~1100 tokens (configurable), distributed across layers with graceful truncation.
 
-### Multi-user architecture
+### Multi-user architecture (Block-Level ACL)
 
-The engine is designed from the ground up for **multi-user** environments (families, teams, shared assistants). Every fact is tagged with an **owner**, enabling per-user isolation and cross-user attribution:
+The engine is designed from the ground up for **multi-user** environments (families, teams, shared assistants). The knowledge base is a **unified, shared space**, but privacy is enforced at the **block level**. Every fact is tagged with an **owner**, which acts as its Access Control List (ACL):
 
-| Owner type | Scope | Example |
-|------------|-------|---------|
-| `user` | Private to one person | "Alice does karate" → owned by `alice` |
-| `group` | Shared within a group | "We need detergent" → owned by `family` |
-| `global` | Visible to all users | "The WiFi password is ..." → owned by `system` |
+| Owner type | Scope (Who can read) | Example | Injected `<auth>` tag |
+|------------|-------|---------|---------|
+| `global` | Visible to all users | "The WiFi password is ..." | None |
+| `group` | Shared within a group + Sender | "We need detergent" (owner: `family`) | `<auth type="group" owner="family" sender="alice">` |
+| `user` | Private to one person + Sender | "Alice does karate" (owner: `alice`) | `<auth type="user" owner="alice" sender="bob">` |
 
-**Cross-user attribution** — when user A says *"Bob doesn't like pesto"*, the classifier attributes the fact to `bob`, not to the sender. This means Bob's wiki page and recall context reflect the preference correctly, even though Bob didn't say it himself.
+**Cross-user attribution** — when user A says *"Bob doesn't like pesto"*, the classifier attributes the fact to `bob`. The wiki compiler will write this fact into a shared document but protect it with `<auth type="user" owner="bob" sender="alice">`.
 
-**Recall scoping** — during context injection, each user sees:
-- Their own facts (`owner_id = sender_id`)
-- Group facts they belong to (`owner_type = 'group'`)
-- Global facts (`owner_type = 'global'`)
+**Recall scoping & Regex Filtering** — during context injection, Sam loads the shared wiki file. Before passing it to the LLM, the `recall.ts` module uses a regex filter to **instantly redact** any `<auth>` block the current user is not authorized to see. An authorization succeeds if:
+- They are the `sender_id`.
+- They are the `owner` (for type `user`).
+- They belong to the `owner` group (for type `group`).
+Facts from other users are **never** leaked into someone else's prompt, effectively acting like a dynamically declassified document.
 
-Facts from other users are **never** leaked into someone else's prompt.
-
-**Wiki pages** — the dream engine auto-generates a wiki page per entity under `wiki/entities/`, per group under `wiki/groups/`, and per concept under `wiki/concepts/`. Each page aggregates all active facts for that owner, organized by type (rules, preferences, facts, episodes).
+**Wiki pages (Topic-Driven)** — the dream engine auto-generates a unified wiki in a flat structure under `wiki/pages/`. Pages are generated per **Topic** (e.g., `ashnazg.md`, `dnd.md`), aggregating all facts that belong to that concept. The LLM compiler seamlessly merges public and restricted facts into narrative prose, injecting the necessary `<auth>` HTML tags for restricted paragraphs.
 
 ## Development
 

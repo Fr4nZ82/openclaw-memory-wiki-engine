@@ -112,6 +112,32 @@ export function resolveAllSenderIds(
 }
 
 // ---------------------------------------------------------------------------
+// ACL Security
+// ---------------------------------------------------------------------------
+
+/**
+ * Applies block-level ACL redaction.
+ */
+function applyAclRedaction(db: Database.Database, content: string, senderId: string, canonicalId: string): string {
+  const aclRegex = /<wikiauth\s+type="([^"]+)"\s+owner="([^"]+)"\s+sender="([^"]+)">([\s\S]*?)<\/wikiauth>/g;
+  
+  return content.replace(aclRegex, (match, type, owner, sender, innerText) => {
+    if (sender === senderId) return innerText;
+    if (type === "user" && owner === canonicalId) return innerText;
+    if (type === "group") {
+      const groupRow = db.prepare("SELECT members FROM user_groups WHERE id = ?").get(owner) as { members: string } | undefined;
+      if (groupRow) {
+        try {
+          const members = JSON.parse(groupRow.members) as string[];
+          if (members.includes(canonicalId)) return innerText;
+        } catch {}
+      }
+    }
+    return `[REDACTED]`;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -148,6 +174,7 @@ export interface RecallContext {
  * @returns The assembled context ready for injection
  */
 export async function buildRecallContext(
+  api: any,
   db: Database.Database,
   config: PluginConfig,
   sessionId: string,
@@ -173,14 +200,9 @@ export async function buildRecallContext(
   log(`buildRecallContext: sender=${senderId}, canonical=${canonicalId}, allSenders=[${allSenderIds.join(',')}], session=${sessionId}, query="${userQuery.substring(0, 50)}"`);
 
   // -----------------------------------------------------------------
-  // 1. MEMORY.md — operational rules (always on top)
+  // 1. MEMORY.md — operational rules (deprecated in V2)
   // -----------------------------------------------------------------
-  const memoryMd = loadMemoryMd(config);
-  if (memoryMd) {
-    parts.push("## Operational rules (MEMORY.md)\n" + memoryMd);
-    charBudget -= memoryMd.length;
-    details.memoryMdLoaded = true;
-  }
+  // MEMORY.md has been removed. All rules are now in the wiki.
 
   // -----------------------------------------------------------------
   // 2. Routing hints — guide the agent to appropriate skills
@@ -194,7 +216,7 @@ export async function buildRecallContext(
   // -----------------------------------------------------------------
   const sessionTopics = getSessionTopics(db, sessionId);
   if (sessionTopics.length > 0 && charBudget > 500) {
-    const wikiContent = loadWikiPages(config, sessionTopics);
+    const wikiContent = await synthesizeWikiPages(api, db, config, sessionTopics, userQuery, senderId, canonicalId);
     if (wikiContent) {
       // Truncate to available budget
       const truncated =
@@ -270,22 +292,7 @@ export async function buildRecallContext(
 // Components
 // ---------------------------------------------------------------------------
 
-/**
- * Loads MEMORY.md — operational rules.
- * Contains only rules that change the agent's behavior.
- */
-function loadMemoryMd(config: PluginConfig): string | null {
-  const memoryPath = path.join(
-    path.dirname(config.dbPath),
-    "MEMORY.md"
-  );
-
-  try {
-    return fs.readFileSync(memoryPath, "utf-8").trim();
-  } catch {
-    return null;
-  }
-}
+// MEMORY.md loader removed
 
 /**
  * Routing hints: tell the agent where to look for tasks and appointments.
@@ -332,15 +339,18 @@ function getSessionTopics(
 }
 
 /**
- * Loads wiki pages relevant to the session topics.
- *
- * Uses topic-index.json to find the right pages, then
- * reads the markdown file contents.
+ * Loads wiki pages relevant to the session topics, expands wikilinks (depth 1),
+ * applies ACL redactions, and uses the local LLM to synthesize the context.
  */
-function loadWikiPages(
+async function synthesizeWikiPages(
+  api: any,
+  db: Database.Database,
   config: PluginConfig,
-  topics: string[]
-): string | null {
+  topics: string[],
+  userQuery: string,
+  senderId: string,
+  canonicalId: string
+): Promise<string | null> {
   const indexPath = path.join(config.wikiPath, "_meta", "topic-index.json");
 
   let topicIndex: Record<string, string[]>;
@@ -361,24 +371,78 @@ function loadWikiPages(
 
   if (pageFiles.size === 0) return null;
 
-  // Load content (max 3 pages to avoid budget explosion)
+  // Load primary pages and extract wikilinks
   const contents: string[] = [];
+  const linkedPages = new Set<string>();
   let count = 0;
+
   for (const pageFile of pageFiles) {
     if (count >= 3) break;
     const filePath = path.join(config.wikiPath, pageFile);
     try {
-      const content = fs.readFileSync(filePath, "utf-8");
-      // Remove YAML frontmatter
-      const cleaned = content.replace(/^---[\s\S]*?---\s*/, "").trim();
+      const rawContent = fs.readFileSync(filePath, "utf-8");
+      const redactedContent = applyAclRedaction(db, rawContent, senderId, canonicalId);
+      const cleaned = redactedContent.replace(/^---[\s\S]*?---\s*/, "").trim();
       contents.push(`### ${path.basename(pageFile, ".md")}\n${cleaned}`);
       count++;
+
+      // Extract wikilinks
+      const linkRegex = /\[\[(.*?)(?:\|.*?)?\]\]/g;
+      let match;
+      while ((match = linkRegex.exec(cleaned)) !== null) {
+        linkedPages.add(match[1]);
+      }
     } catch {
-      // File not found — topic-index out of date, skip
+      // File not found
     }
   }
 
-  return contents.length > 0 ? contents.join("\n\n") : null;
+  // Load linked pages (depth 1)
+  let linkedCount = 0;
+  for (const slug of linkedPages) {
+    if (linkedCount >= 3) break; // Don't explode context
+    const p = path.join(config.wikiPath, "pages", `${slug}.md`);
+    if (fs.existsSync(p)) {
+      const rawContent = fs.readFileSync(p, "utf-8");
+      const redactedContent = applyAclRedaction(db, rawContent, senderId, canonicalId);
+      const cleaned = redactedContent.replace(/^---[\s\S]*?---\s*/, "").trim();
+      contents.push(`### ${slug} (linked)\n${cleaned}`);
+      linkedCount++;
+    }
+  }
+
+  const rawContext = contents.join("\n\n");
+  if (!rawContext) return null;
+
+  if (!api || (!api.llmTask && !api.callTool)) {
+    return rawContext;
+  }
+
+  const prompt = `Ecco la conversazione in corso (query utente):
+"""
+${userQuery}
+"""
+
+Ecco i documenti di riferimento dalla Wiki:
+"""
+${rawContext.substring(0, 10000)}
+"""
+
+Estrai unicamente in un breve paragrafo in prosa discorsiva i concetti utili per rispondere. Non inventare nulla.`;
+
+  try {
+    let response: string;
+    if (api.llmTask) {
+      // Use local model on Torre GPU as per documentation
+      response = await api.llmTask({ prompt, model: "llama3" });
+    } else {
+      response = await api.callTool("llm-task", { prompt, model: "llama3" });
+    }
+    return typeof response === "string" ? response : String(response);
+  } catch (error) {
+    log(`synthesizeWikiPages LLM error: ${error}, falling back to raw`);
+    return rawContext;
+  }
 }
 
 // ---------------------------------------------------------------------------

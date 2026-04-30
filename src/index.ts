@@ -179,9 +179,43 @@ function register(api: any): void {
 
         dlog(`processUserMessage START: "${message.text.substring(0, 60)}" sender=${message.sender_id}`);
 
+        // Check Pending Captures Threshold & Kill-Switch
+        const pendingRows = database.prepare("SELECT COUNT(*) as count FROM session_captures WHERE promoted = 0").get() as { count: number };
+        const pendingCount = pendingRows?.count || 0;
+
+        if (pendingCount >= config.dreamCaptureThreshold * 2) {
+          const { isOllamaAvailable } = await import("./embedding");
+          const ollamaOnline = await isOllamaAvailable(config);
+          
+          if (!ollamaOnline) {
+            ocLog.warn(`[Capture] 🛑 KILL-SWITCH ACTIVATED: Memory overflow (${pendingCount} pending) and Ollama is OFFLINE. Capture blocked.`);
+            // Inform the user if possible via generic text response using the SDK, though not guaranteed to halt Samwise's reasoning hook
+            try {
+              if (api.sendMessage) {
+                await api.sendMessage(event.from, "⚠️ [Memory Engine] Il mio sistema di memoria è in overflow e la torre GPU è irraggiungibile per la compressione. Non memorizzerò più nuovi fatti finché il problema non sarà risolto.");
+              }
+            } catch (err) {}
+            return; // Abort capture pipeline completely
+          }
+        }
+
         const stats = await processUserMessage(api, database, config, message);
 
         dlog(`processUserMessage END: captured=${stats.captured}, classified=${stats.classified}, skipped=${stats.skipped_reason || 'none'}`);
+
+        // Dynamic Dream Trigger
+        if (pendingCount + (stats.captured ? 1 : 0) >= config.dreamCaptureThreshold) {
+          ocLog.info(`[Capture] Threshold reached (${pendingCount + (stats.captured ? 1 : 0)} pending >= ${config.dreamCaptureThreshold}). Triggering automatic Dream Light...`);
+          try {
+            const { dreamLight } = await import("./dream");
+            // Run async without awaiting so we don't block the hook
+            dreamLight(database, config, ocLog).catch(e => {
+              ocLog.error(`[Capture] Automatic Dream Light failed: ${e}`);
+            });
+          } catch (e) {
+            ocLog.error(`[Capture] Failed to import dreamLight: ${e}`);
+          }
+        }
 
         if (stats.captured) {
           ocLog.info(
@@ -485,6 +519,7 @@ function register(api: any): void {
         }
 
         const recallCtx = await buildRecallContext(
+          api,
           database,
           config,
           sessionId,
@@ -572,6 +607,7 @@ function register(api: any): void {
         const senderId = lastResolvedSender !== "unknown" ? lastResolvedSender : "unknown";
         const sessionId = senderId !== "unknown" ? `telegram:${senderId}` : "unknown";
         const recallCtx = await buildRecallContext(
+          api,
           database,
           config,
           sessionId,
@@ -598,8 +634,8 @@ function register(api: any): void {
       label: "Archive Search",
       description:
         "Search raw transcripts of past conversations. " +
-        "Last-resort fallback when memory and wiki have no results. " +
-        "Returns original messages with context.",
+        "CRITICAL: Use ONLY if the user explicitly asks for past chat logs or insists after a failed memory_search. " +
+        "NEVER use this on the first round. Returns original messages with context.",
       parameters: {
         type: "object",
         properties: {
@@ -690,7 +726,7 @@ function register(api: any): void {
         const type = ctx.args?.trim() === "rem" ? "rem" : "light";
         const report =
           type === "rem"
-            ? await dreamRem(database, config, ocLog)
+            ? await dreamRem(api, database, config, ocLog)
             : await dreamLight(database, config, ocLog);
 
         return {
@@ -804,71 +840,6 @@ function register(api: any): void {
         };
       },
     });
-
-    // /wiki-lint — health check
-    api.registerCommand({
-      name: "wiki-lint",
-      description:
-        "Wiki health check: stale pages, orphans, empty, gaps",
-      acceptsArgs: false,
-      requireAuth: false,
-      handler: () => {
-        const database = getDb();
-        if (!database || !config) return { text: "Plugin not initialized" };
-
-        const report = wikiLint(database, config);
-
-        const lines = [
-          "🔍 Wiki Lint Report",
-          `- Total pages: ${report.totalPages}`,
-          `- Stale (>30d): ${report.stalePages}`,
-          `- Orphan: ${report.orphanPages}`,
-          `- Empty: ${report.emptyPages}`,
-          `- Topic index: ${report.missingTopicIndex ? "❌ missing" : "✅ ok"}`,
-        ];
-
-        if (report.issues.length > 0) {
-          lines.push("");
-          lines.push("Details:");
-          for (const issue of report.issues) {
-            const icon =
-              issue.severity === "error"
-                ? "❌"
-                : issue.severity === "warning"
-                  ? "⚠️"
-                  : "ℹ️";
-            lines.push(`${icon} ${issue.page}: ${issue.message}`);
-          }
-        } else {
-          lines.push("\n✅ No issues found");
-        }
-
-        return { text: lines.join("\n") };
-      },
-    });
-
-    // /wiki-sync — incremental update
-    api.registerCommand({
-      name: "wiki-sync",
-      description:
-        "Updates wiki from recent changes (last 24h)",
-      acceptsArgs: false,
-      requireAuth: false,
-      handler: () => {
-        const database = getDb();
-        if (!database || !config) return { text: "Plugin not initialized" };
-
-        const result = wikiSync(database, config, ocLog);
-
-        return {
-          text: [
-            "🔄 Wiki Sync complete",
-            `- Pages updated: ${result.pagesUpdated}`,
-            `- Topic index: ${result.topicIndexUpdated ? "regenerated" : "unchanged"}`,
-          ].join("\n"),
-        };
-      },
-    });
   }
 
   // -------------------------------------------------------------------
@@ -884,7 +855,7 @@ function register(api: any): void {
       ocLog.info(
         `[Memory Wiki Engine] Activated — DB: ${config.dbPath}, Wiki: ${config.wikiPath}`
       );
-      scheduleDreams(config, database, ocLog);
+      scheduleDreams(api, config, database, ocLog);
     });
   }
 
@@ -915,6 +886,7 @@ function register(api: any): void {
  *   - REM: 1x/night at configured time
  */
 function scheduleDreams(
+  api: any,
   config: PluginConfig,
   db: Database.Database,
   log: any
@@ -931,7 +903,7 @@ function scheduleDreams(
   dreamTimer.unref();
 
   // REM dream — 1x/night
-  scheduleNextRem(config, db, log);
+  scheduleNextRem(api, config, db, log);
 
   log.info(
     `[Memory Wiki Engine] Dreams scheduled — light: every ${config.dreamIntervalHours}h, ` +
@@ -944,6 +916,7 @@ function scheduleDreams(
  * and schedules it.
  */
 function scheduleNextRem(
+  api: any,
   config: PluginConfig,
   db: Database.Database,
   log: any
@@ -962,12 +935,12 @@ function scheduleNextRem(
 
   remTimer = setTimeout(async () => {
     try {
-      await dreamRem(db, config, log);
+      await dreamRem(api, db, config, log);
     } catch (error) {
       log.warn("[Dream] Error in scheduled REM dream:", error);
     }
     // Reschedule for the next night
-    scheduleNextRem(config, db, log);
+    scheduleNextRem(api, config, db, log);
   }, msUntilRem);
   remTimer.unref();
 }
