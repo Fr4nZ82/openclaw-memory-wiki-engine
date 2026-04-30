@@ -575,6 +575,27 @@ async function resolveGeminiApiKey(api: any): Promise<string | null> {
     }
   }
 
+  // 3. Fallback: process.env
+  if (process.env.GEMINI_API_KEY) {
+    log("Found GEMINI_API_KEY in process.env");
+    return process.env.GEMINI_API_KEY;
+  }
+
+  // 4. Fallback: ~/.openclaw/.env
+  try {
+    const envPath = path.join(os.homedir(), ".openclaw", ".env");
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, "utf-8");
+      const match = content.match(/^GEMINI_API_KEY=(.+)/m);
+      if (match && match[1]) {
+        log("Found GEMINI_API_KEY in ~/.openclaw/.env");
+        return match[1].trim();
+      }
+    }
+  } catch (e) {
+    log(`Env fallback THREW: ${e}`);
+  }
+
   log(`ALL key resolution methods FAILED — returning null`);
   return null;
 }
