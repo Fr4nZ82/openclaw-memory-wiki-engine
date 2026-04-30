@@ -56,6 +56,18 @@ export interface WikiStatus {
 // /wiki-ingest
 // ---------------------------------------------------------------------------
 
+/**
+ * Processes all files in the raw/ folder and transforms them into
+ * wiki pages or facts in the database.
+ *
+ * Supported formats:
+ *   - .md   → read directly, facts extracted via LLM
+ *   - .txt  → read directly, facts extracted via LLM
+ *   - .json → parsed as array of structured facts
+ *
+ * Material in raw/ is NOT deleted after ingest —
+ * it stays as a reference for future verification.
+ */
 export async function wikiIngest(
   api: any,
   db: Database.Database,
@@ -117,6 +129,15 @@ export async function wikiIngest(
   return result;
 }
 
+/**
+ * Processes a JSON file of structured facts.
+ *
+ * Expected format:
+ * [
+ *   { "text": "...", "fact_type": "fact", "topics": ["..."], "owner_id": "..." },
+ *   ...
+ * ]
+ */
 async function processJsonIngest(
   db: Database.Database,
   config: PluginConfig,
@@ -159,6 +180,12 @@ async function processJsonIngest(
   logger.info(`[Wiki Ingest] ${fileName}: ${facts.length} facts imported as captures`);
 }
 
+/**
+ * Processes a text file (MD/TXT).
+ *
+ * Uses the LLM to extract relevant facts from text, then saves
+ * them as captures that will be promoted by the dream.
+ */
 async function processTextIngest(
   api: any,
   db: Database.Database,
@@ -210,6 +237,13 @@ Respond with a JSON array:
 // /wiki-lint
 // ---------------------------------------------------------------------------
 
+/**
+ * Scans the wiki to identify health issues.
+ * Checks for:
+ *   - Empty pages (<20 characters)
+ *   - Stale pages (not updated in 30+ days)
+ *   - Missing or empty topic-index.json
+ */
 export async function wikiLint(
   api: any,
   db: Database.Database,
@@ -300,6 +334,14 @@ export async function wikiLint(
 // /wiki-sync
 // ---------------------------------------------------------------------------
 
+/**
+ * Incremental wiki update based on recent facts.
+ *
+ * Differs from full dream REM because:
+ *   - No de-duplication or decay of old captures
+ *   - Specifically triggers the updateWikiPages compiler logic
+ *   - Designed for manual triggering when immediate propagation is needed
+ */
 export async function wikiSync(
   api: any,
   db: Database.Database,
@@ -317,6 +359,12 @@ export async function wikiSync(
 // /wiki-status
 // ---------------------------------------------------------------------------
 
+/**
+ * Returns the current statistical status of the wiki.
+ *
+ * Scans the pages/ directory and the topic-index to calculate
+ * total pages, disk size, and modification dates.
+ */
 export function getWikiStatus(
   config: PluginConfig
 ): WikiStatus {
@@ -363,6 +411,10 @@ export function getWikiStatus(
 // searchArchive
 // ---------------------------------------------------------------------------
 
+/**
+ * Performs a Full-Text Search (FTS) or fallback LIKE query
+ * against the session_archive table.
+ */
 export function searchArchive(
   db: Database.Database,
   query: string,
@@ -415,6 +467,10 @@ interface WikiPageInfo {
   fileName: string;
 }
 
+/**
+ * Recursively scans the wiki folder for .md pages.
+ * Ignores _meta/ and hidden files.
+ */
 function scanWikiPages(dir: string): WikiPageInfo[] {
   const pages: WikiPageInfo[] = [];
 
