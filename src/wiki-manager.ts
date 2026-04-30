@@ -184,8 +184,10 @@ async function processJsonIngest(
 /**
  * Processes a text file (MD/TXT).
  *
- * Uses the LLM to extract relevant facts from text, then saves
- * them as captures that will be promoted by the dream.
+ * Moves the raw file into the wiki/attachments/ directory,
+ * reads its content, and asks the LLM to produce a single summary fact
+ * pointing to the attachment. This prevents database pollution with
+ * raw text while keeping the document referenced in active memory.
  */
 async function processTextIngest(
   api: any,
@@ -196,20 +198,27 @@ async function processTextIngest(
   result: IngestResult,
   logger: any
 ): Promise<void> {
-  // Use the LLM to extract facts for ALL text files now
-  if (api.llmTask || api.callTool) {
-    const prompt = `Extract the important facts from the following text. For each fact:
-- Rephrase in third person
-- Classify as: fact, preference, rule, or episode
-- Assign 1-2 topics
+  const attachmentsDir = path.join(config.wikiPath, "attachments");
+  if (!fs.existsSync(attachmentsDir)) {
+    fs.mkdirSync(attachmentsDir, { recursive: true });
+  }
 
-Text:
+  const attachmentPath = path.join(attachmentsDir, fileName);
+  fs.writeFileSync(attachmentPath, content, "utf-8");
+  logger.info(`[Wiki Ingest] ${fileName} moved to attachments/`);
+
+  if (api.llmTask || api.callTool) {
+    const prompt = `You are an archivist. Read the following text excerpt from a document named "${fileName}".
+Write ONE single comprehensive fact (max 2-3 sentences) summarizing what this document is about and noting that it has been saved as an attachment. 
+Assign 1-2 relevant topics.
+
+Text excerpt:
 """
 ${content.substring(0, 8000)}
 """
 
-Respond with a JSON array:
-[{"text": "...", "fact_type": "fact", "topics": ["..."], "owner_id": "system"}]`;
+Respond ONLY with a valid JSON array containing exactly one object:
+[{"text": "I read the document X. It talks about Y. The full file is saved in attachments/Z.", "fact_type": "fact", "topics": ["..."], "owner_id": "system"}]`;
 
     try {
       let response: string;
@@ -225,12 +234,16 @@ Respond with a JSON array:
 
       const extracted =
         typeof response === "string" ? response : JSON.stringify(response);
-      await processJsonIngest(db, config, extracted, fileName, result, logger);
+
+      // We still use processJsonIngest to actually save this summary fact,
+      // which will now go directly into the facts table.
+      await processJsonIngest(db, config, extracted, fileName + "_summary", result, logger);
+      
     } catch (error) {
       result.errors.push(`${fileName}: LLM extraction failed: ${error}`);
     }
   } else {
-    result.errors.push(`${fileName}: LLM not available for extraction`);
+    result.errors.push(`${fileName}: LLM not available for summary extraction`);
   }
 }
 
