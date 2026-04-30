@@ -160,7 +160,7 @@ async function processJsonIngest(
   for (const fact of facts) {
     if (!fact.text) continue;
 
-    const factId = generateFactId(fact.text, fact.owner_id || "system");
+    const factId = generateFactId();
 
     db.prepare(
       `INSERT OR REPLACE INTO facts
