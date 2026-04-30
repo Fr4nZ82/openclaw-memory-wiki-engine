@@ -556,14 +556,33 @@ function register(api: any): void {
         return { ingested: true };
       },
 
-      // Local truncation: keep last keepTurns turns during assembly
+      // Local truncation: keep last keepTurns turns safely
       async assemble({ messages }: { messages: any[] }) {
         const keepTurns = config!.keepTurns;
         const keepMessages = keepTurns * 2;
         let finalMessages = messages;
         if (Array.isArray(messages) && messages.length > keepMessages) {
-          finalMessages = messages.slice(-keepMessages);
-          dlog(`assemble(): truncating ${messages.length} → ${keepMessages} messages (keepTurns=${keepTurns})`);
+          let candidateIndex = messages.length - keepMessages;
+          
+          // SAFE TRUNCATION: Gemini will throw 400 INVALID_ARGUMENT if we cut history in the
+          // middle of a function_call / function_response pair, or if the history starts with
+          // an orphaned model/tool message. We must walk forward until we find a CLEAN user message.
+          while (candidateIndex < messages.length) {
+            const msg = messages[candidateIndex];
+            if (msg.role === "user") {
+              // Check if it's a clean user message (no tool_result/functionResponse parts)
+              const hasToolResult = Array.isArray(msg.content) 
+                ? msg.content.some((p: any) => p.type === "tool_result" || p.type === "functionResponse")
+                : false;
+              if (!hasToolResult) {
+                break; // Found a safe boundary
+              }
+            }
+            candidateIndex++;
+          }
+
+          finalMessages = messages.slice(candidateIndex);
+          dlog(`assemble(): safely truncated ${messages.length} → ${finalMessages.length} messages (keepTurns=${keepTurns})`);
         }
         return { messages: finalMessages, estimatedTokens: 0 };
       },
