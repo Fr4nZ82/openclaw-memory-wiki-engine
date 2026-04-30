@@ -155,29 +155,30 @@ async function processJsonIngest(
     return;
   }
 
-  const { topicsToJson } = await import("./utils");
+  const { topicsToJson, generateFactId } = await import("./utils");
 
   for (const fact of facts) {
     if (!fact.text) continue;
 
+    const factId = generateFactId(fact.text, fact.owner_id || "system");
+
     db.prepare(
-      `INSERT INTO session_captures
-        (session_id, message_text, fact_text, topics, sender_id,
-         owner_type, owner_id, fact_type, is_internal, captured_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, datetime('now'))`
+      `INSERT OR REPLACE INTO facts
+        (id, owner_type, owner_id, text, fact_type, topics, confidence, source, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))`
     ).run(
-      "ingest",
-      `ingest:${fileName}`,
-      fact.text,
-      topicsToJson(fact.topics || ["ingest"]),
-      "system",
+      factId,
       fact.owner_type || "global",
       fact.owner_id || "system",
-      fact.fact_type || "fact"
+      fact.text,
+      fact.fact_type || "fact",
+      topicsToJson(fact.topics || ["ingest"]),
+      fact.confidence || 0.9,
+      `ingest:${fileName}`
     );
   }
 
-  logger.info(`[Wiki Ingest] ${fileName}: ${facts.length} facts imported as captures`);
+  logger.info(`[Wiki Ingest] ${fileName}: ${facts.length} facts imported directly into permanent memory`);
 }
 
 /**
