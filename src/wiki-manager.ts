@@ -478,11 +478,6 @@ export function wikiLint(
 
 /**
  * Incremental wiki update based on recent facts.
- *
- * Differs from dream REM because:
- *   - No de-duplication or decay
- *   - Only updates pages for owners with recently modified facts
- *   - Faster, designed for manual use
  */
 export async function wikiSync(
   api: any,
@@ -490,51 +485,10 @@ export async function wikiSync(
   config: PluginConfig,
   logger: any
 ): Promise<{ pagesUpdated: number; topicIndexUpdated: boolean }> {
-  let pagesUpdated = 0;
-
-  const { syncHumanEdits, semanticMergePage } = await import("./wiki-compiler");
-  await syncHumanEdits(api, db, config, logger);
-
-  // Find owners with facts modified in the last 24h
-  const recentOwners = db
-    .prepare(
-      `SELECT DISTINCT owner_type, owner_id
-       FROM facts
-       WHERE is_active = 1
-         AND updated_at > datetime('now', '-1 day')`
-    )
-    .all() as Array<{ owner_type: string; owner_id: string }>;
-
-  for (const owner of recentOwners) {
-    const ownerObj = {
-      owner_type: owner.owner_type,
-      owner_id: owner.owner_id,
-      title: owner.owner_id,
-    };
-
-    // Load facts
-    const facts = db
-      .prepare(
-        `SELECT text, fact_type, topics, confidence, updated_at
-         FROM facts
-         WHERE is_active = 1 AND owner_type = ? AND owner_id = ?
-         ORDER BY fact_type, updated_at DESC`
-      )
-      .all(owner.owner_type, owner.owner_id);
-
-    if (facts.length === 0) continue;
-
-    const updated = await semanticMergePage(api, config, ownerObj, facts, logger);
-    if (updated) pagesUpdated++;
-  }
-
-  // Update topic-index
-  updateTopicIndexFromDb(db, config);
-
-  logger.info(
-    `[Wiki Sync] ${pagesUpdated} pages updated, topic-index regenerated`
-  );
-
+  const { updateWikiPages } = await import("./dream");
+  const pagesUpdated = await updateWikiPages(api, db, config, logger);
+  
+  logger.info(`[Wiki Sync] ${pagesUpdated} pages updated`);
   return { pagesUpdated, topicIndexUpdated: true };
 }
 

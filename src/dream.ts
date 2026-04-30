@@ -379,7 +379,7 @@ function decayConfidence(db: Database.Database, logger: any): number {
  *   - Entity with rule: 1 fact_type="rule" → create page
  *   - Group: on first owner_type=group fact → create page
  */
-async function updateWikiPages(
+export async function updateWikiPages(
   api: any,
   db: Database.Database,
   config: PluginConfig,
