@@ -494,6 +494,9 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
   const model = "gemini-3-flash-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
+  log(`Calling Gemini API (${model}). Prompt length: ${prompt.length} chars...`);
+  const startTime = Date.now();
+
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -505,20 +508,23 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
         maxOutputTokens: 16384,
       },
     }),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(180000), // 3 minutes timeout for heavy wiki generation
   });
+
+  const durationMs = Date.now() - startTime;
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`Gemini API error ${response.status}: ${text.substring(0, 200)}`);
+    throw new Error(`Gemini API error ${response.status} (after ${durationMs}ms): ${text.substring(0, 200)}`);
   }
 
   const data = await response.json() as any;
   const finishReason = data?.candidates?.[0]?.finishReason;
   const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  log(`Gemini finishReason=${finishReason}, content length=${content?.length || 0}`);
+  log(`Gemini response received in ${durationMs}ms. finishReason=${finishReason}, content length=${content?.length || 0}`);
+  
   if (finishReason === "MAX_TOKENS") {
-    log(`WARNING: Gemini hit MAX_TOKENS — response truncated!`);
+    log("WARNING: Gemini output was truncated due to MAX_TOKENS!");
   }
   if (!content) {
     log(`Gemini raw response: ${JSON.stringify(data).substring(0, 500)}`);
