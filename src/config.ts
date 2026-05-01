@@ -57,6 +57,9 @@ export interface PluginConfig {
 
   /** BM25 component weight in hybrid search (0-1) */
   bm25Weight: number;
+
+  /** Enable debug logging across the engine */
+  debug: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +101,9 @@ export const DEFAULT_CONFIG: PluginConfig = {
   // Hybrid search weights
   vectorWeight: 0.7,
   bm25Weight: 0.3,
+
+  // Debugging
+  debug: true,
 };
 
 // ---------------------------------------------------------------------------

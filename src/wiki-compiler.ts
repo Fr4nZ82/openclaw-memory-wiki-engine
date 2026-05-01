@@ -95,6 +95,7 @@ ${newContent.substring(0, 4000)}
 """`;
 
   try {
+    if (config.debug) logger.debug(`[Wiki Compiler] Extracting delta from ${relativePath} with LLM...`);
     let response = await callLlmTask(api, prompt);
 
     const facts = JSON.parse(typeof response === "string" ? response : JSON.stringify(response));
@@ -122,9 +123,11 @@ ${newContent.substring(0, 4000)}
         );
       }
       logger.info(`[Wiki Compiler] Extracted ${facts.length} facts from ${relativePath} edits`);
+      if (config.debug) logger.debug(`[Wiki Compiler] Successfully saved ${facts.length} new captures for the Dream Engine`);
     }
   } catch (error) {
-    logger.warn(`[Wiki Compiler] Delta extraction failed for ${relativePath}: ${error}`);
+    logger.error(`[Wiki Compiler] Delta extraction failed for ${relativePath}. Aborting: ${error}`);
+    throw error;
   }
 }
 
@@ -215,6 +218,7 @@ ${factsList}
 """`;
 
     try {
+      if (config.debug) logger.debug(`[Wiki Compiler] Requesting semantic merge for ${targetEntity.title} from LLM...`);
       const response = await callLlmTask(api, prompt);
       
       const parsed = typeof response === "string" ? JSON.parse(response) : response;
@@ -223,21 +227,21 @@ ${factsList}
       if (Array.isArray(parsed.aliases)) aliases = parsed.aliases;
       
     } catch (e) {
-      logger.warn(`[Wiki Compiler] LLM failed for ${relativePath}, falling back to list mode: ${e}`);
+      logger.error(`[Wiki Compiler] LLM failed for ${relativePath}. Aborting compilation: ${e}`);
+      throw e;
     }
   } catch (e) {
-      logger.warn(`[Wiki Compiler] Directory read failed: ${e}`);
+      logger.error(`[Wiki Compiler] Directory read failed: ${e}`);
+      throw e;
   }
 
-  // Fallback to static lists if LLM fails or is missing
+  // Strict enforcement: LLM must succeed
   if (!mergedBody) {
-    const lines = [`# ${targetEntity.title}`, ""];
-    for (const fact of facts) {
-      lines.push(`- ${fact.text}`);
-    }
-    mergedBody = lines.join("\n");
+    throw new Error(`[Wiki Compiler] LLM failed to return a valid mergedBody for ${relativePath}`);
   }
 
+  if (config.debug) logger.debug(`[Wiki Compiler] Generating frontmatter for ${targetEntity.title}`);
+  
   // Generate Obsidian YAML Frontmatter
   const tagsYaml = Array.from(tagsSet).map(t => `  - ${t}`).join("\n");
   const aliasesYaml = aliases.length > 0 ? "\n" + aliases.map(a => `  - "${a}"`).join("\n") : " []";
