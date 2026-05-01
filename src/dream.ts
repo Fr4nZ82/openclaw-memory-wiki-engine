@@ -207,8 +207,36 @@ async function promoteCapture(
   report: DreamReport,
   logger: any
 ): Promise<void> {
-  const factId = generateFactId();
   const topics = jsonToTopics(capture.topics);
+
+  // 1. Check for exact duplicate (normalized text)
+  const normalizedText = capture.fact_text.toLowerCase().replace(/[^\w\s]/g, "").trim();
+  
+  const existingFacts = db.prepare(
+    `SELECT id, text FROM facts WHERE is_active = 1 AND owner_type = ? AND owner_id = ?`
+  ).all(capture.owner_type, capture.owner_id) as { id: string; text: string }[];
+  
+  let exactMatchId: string | null = null;
+  for (const f of existingFacts) {
+    const fNorm = f.text.toLowerCase().replace(/[^\w\s]/g, "").trim();
+    if (fNorm === normalizedText) {
+      exactMatchId = f.id;
+      break;
+    }
+  }
+
+  if (exactMatchId) {
+    // Just update the existing fact's updated_at
+    db.transaction(() => {
+      db.prepare(`UPDATE facts SET updated_at = datetime('now') WHERE id = ?`).run(exactMatchId);
+      db.prepare(`UPDATE session_captures SET promoted = 1 WHERE id = ?`).run(capture.id);
+    })();
+    report.factsDeduplicated++;
+    logger.info(`[Dream] Exact duplicate skipped: "${capture.fact_text.substring(0, 40)}..." -> refreshed ${exactMatchId}`);
+    return;
+  }
+
+  const factId = generateFactId();
 
   // Generate embedding
   let embeddingBuffer: Buffer | null = null;
