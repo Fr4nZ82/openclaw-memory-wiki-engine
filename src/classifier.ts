@@ -508,7 +508,7 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
         maxOutputTokens: 16384,
       },
     }),
-    signal: AbortSignal.timeout(180000), // 3 minutes timeout for heavy wiki generation
+    signal: AbortSignal.timeout(60000), // 1 minute timeout
   });
 
   const durationMs = Date.now() - startTime;
