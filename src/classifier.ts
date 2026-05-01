@@ -485,7 +485,7 @@ function writeClassifierAudit(prompt: string, model: string): void {
  *
  * Uses the REST API with JSON response mode for fast, structured output.
  */
-async function callLlmTask(api: any, prompt: string): Promise<string> {
+export async function callLlmTask(api: any, prompt: string): Promise<string> {
   const apiKey = await resolveGeminiApiKey(api);
   if (!apiKey) {
     throw new Error("No Gemini API key found (checked api.runtime.modelAuth, env, ~/.openclaw/.env)");

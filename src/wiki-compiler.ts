@@ -3,6 +3,8 @@ import * as path from "path";
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
 
+import { callLlmTask } from "./classifier";
+
 /**
  * Ensures the shadow directory exists.
  */
@@ -22,10 +24,6 @@ export async function syncHumanEdits(
   config: PluginConfig,
   logger: any
 ): Promise<number> {
-  if (!api.llmTask && !api.callTool) {
-    logger.warn("[Wiki Compiler] No LLM available for shadow diff.");
-    return 0;
-  }
 
   let humanEditsFound = 0;
   const shadowBase = path.join(config.wikiPath, ".shadow");
@@ -97,12 +95,7 @@ ${newContent.substring(0, 4000)}
 """`;
 
   try {
-    let response: string;
-    if (api.llmTask) {
-      response = await api.llmTask({ prompt, model: "flash", responseFormat: "json" });
-    } else {
-      response = await api.callTool("llm-task", { prompt, model: "flash" });
-    }
+    let response = await callLlmTask(api, prompt);
 
     const facts = JSON.parse(typeof response === "string" ? response : JSON.stringify(response));
     if (Array.isArray(facts) && facts.length > 0) {
@@ -182,7 +175,7 @@ export async function semanticMergePage(
   let description = targetEntity.title;
   let aliases: string[] = [];
 
-  if (api.llmTask || api.callTool) {
+  try {
     // Build known slugs dictionary from pages folder
     const knownSlugs: string[] = [];
     try {
@@ -222,12 +215,7 @@ ${factsList}
 """`;
 
     try {
-      let response: any;
-      if (api.llmTask) {
-        response = await api.llmTask({ prompt, model: "flash", responseFormat: "json" });
-      } else {
-        response = await api.callTool("llm-task", { prompt, model: "flash" });
-      }
+      const response = await callLlmTask(api, prompt);
       
       const parsed = typeof response === "string" ? JSON.parse(response) : response;
       if (parsed.mergedBody) mergedBody = parsed.mergedBody;
@@ -237,6 +225,8 @@ ${factsList}
     } catch (e) {
       logger.warn(`[Wiki Compiler] LLM failed for ${relativePath}, falling back to list mode: ${e}`);
     }
+  } catch (e) {
+      logger.warn(`[Wiki Compiler] Directory read failed: ${e}`);
   }
 
   // Fallback to static lists if LLM fails or is missing

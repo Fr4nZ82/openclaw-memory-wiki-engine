@@ -477,6 +477,7 @@ function updateTopicIndex(
   }
 
   const indexPath = path.join(config.wikiPath, "_meta", "topic-index.json");
+  fs.mkdirSync(path.dirname(indexPath), { recursive: true });
   fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf-8");
 }
 
