@@ -607,6 +607,7 @@ function register(api: any): void {
 
         if (Array.isArray(finalMessages) && finalMessages.length > keepMessages) {
           let candidateIndex = finalMessages.length - keepMessages;
+          const originalCandidate = candidateIndex;
           
           // SAFE TRUNCATION: Gemini will throw 400 INVALID_ARGUMENT if we cut history in the
           // middle of a function_call / function_response pair, or if the history starts with
@@ -623,6 +624,14 @@ function register(api: any): void {
               }
             }
             candidateIndex++;
+          }
+
+          if (candidateIndex >= finalMessages.length) {
+            // Fallback: If no clean boundary was found, we MUST NOT return an empty array.
+            // An empty array guarantees a "contents is not specified" 400 error from Gemini.
+            // Better to fallback to the original truncation point and risk a sequence error.
+            dlog(`assemble(): WARN exhausted all messages looking for safe boundary. Falling back to original index.`);
+            candidateIndex = originalCandidate;
           }
 
           finalMessages = finalMessages.slice(candidateIndex);
