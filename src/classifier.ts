@@ -494,47 +494,65 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
   const model = "gemini-3-flash-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  log(`Calling Gemini API (${model}). Prompt length: ${prompt.length} chars...`);
-  const startTime = Date.now();
+  const MAX_RETRIES = 3;
+  let lastError: Error | unknown;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.1,
-        maxOutputTokens: 16384,
-      },
-    }),
-    signal: AbortSignal.timeout(60000), // 1 minute timeout
-  });
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      log(`Calling Gemini API (${model}, attempt ${attempt}/${MAX_RETRIES}). Prompt length: ${prompt.length} chars...`);
+      const startTime = Date.now();
 
-  const durationMs = Date.now() - startTime;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            responseMimeType: "application/json",
+            temperature: 0.1,
+            maxOutputTokens: 16384,
+          },
+        }),
+        signal: AbortSignal.timeout(60000), // 1 minute timeout per attempt
+      });
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`Gemini API error ${response.status} (after ${durationMs}ms): ${text.substring(0, 200)}`);
+      const durationMs = Date.now() - startTime;
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(`Gemini API error ${response.status} (after ${durationMs}ms): ${text.substring(0, 200)}`);
+      }
+
+      const data = await response.json() as any;
+      const finishReason = data?.candidates?.[0]?.finishReason;
+      const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      log(`Gemini response received in ${durationMs}ms. finishReason=${finishReason}, content length=${content?.length || 0}`);
+      
+      if (finishReason === "MAX_TOKENS") {
+        log("WARNING: Gemini output was truncated due to MAX_TOKENS!");
+      }
+      if (!content) {
+        log(`Gemini raw response: ${JSON.stringify(data).substring(0, 500)}`);
+        throw new Error("Empty response from Gemini");
+      }
+
+      // Log to shared apiaudit.txt (same file as samvise-hooks audit)
+      writeClassifierAudit(prompt, model);
+
+      return content;
+    } catch (e) {
+      lastError = e;
+      log(`Attempt ${attempt} failed: ${e instanceof Error ? e.message : e}`);
+      if (attempt < MAX_RETRIES) {
+        const delay = attempt * 2000; // 2s, 4s...
+        log(`Waiting ${delay}ms before next attempt...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
   }
 
-  const data = await response.json() as any;
-  const finishReason = data?.candidates?.[0]?.finishReason;
-  const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  log(`Gemini response received in ${durationMs}ms. finishReason=${finishReason}, content length=${content?.length || 0}`);
-  
-  if (finishReason === "MAX_TOKENS") {
-    log("WARNING: Gemini output was truncated due to MAX_TOKENS!");
-  }
-  if (!content) {
-    log(`Gemini raw response: ${JSON.stringify(data).substring(0, 500)}`);
-    throw new Error("Empty response from Gemini");
-  }
-
-  // Log to shared apiaudit.txt (same file as samvise-hooks audit)
-  writeClassifierAudit(prompt, model);
-
-  return content;
+  throw new Error(`callLlmTask failed after ${MAX_RETRIES} attempts. Last error: ${lastError instanceof Error ? lastError.message : lastError}`);
 }
 
 /**
