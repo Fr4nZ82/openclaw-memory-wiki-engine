@@ -304,7 +304,7 @@ npm run build  # production build
 
 - Node.js ≥ 20
 - OpenClaw ≥ 2026.4.0
-- Ollama (optional, for vector search)
+- Ollama (mandatory, for vector search and dream consolidation)
 
 ## License
 

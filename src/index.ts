@@ -127,6 +127,24 @@ function register(api: any): void {
   dlog(`Plugin register() called. mode=${registrationMode}, config resolved.`);
 
   // -------------------------------------------------------------------
+  // Strict dependency check: Ollama MUST be available
+  // We run this asynchronously but immediately on load. If it fails,
+  // we brutally kill the entire OpenClaw process.
+  // -------------------------------------------------------------------
+  import("./embedding").then(({ isOllamaAvailable }) => {
+    isOllamaAvailable(config!).then((ollamaOnline) => {
+      if (!ollamaOnline) {
+        ocLog.error(`[Memory Wiki Engine] 🛑 CRITICAL ERROR: Ollama server is unreachable at ${config!.embeddingUrl}`);
+        ocLog.error(`[Memory Wiki Engine] This plugin requires Ollama for vector embeddings. OpenClaw will now exit.`);
+        process.exit(1);
+      }
+    }).catch(err => {
+      ocLog.error(`[Memory Wiki Engine] Failed to check Ollama availability:`, err);
+      process.exit(1);
+    });
+  });
+
+  // -------------------------------------------------------------------
   // Hook: message_received — capture user messages
   // -------------------------------------------------------------------
 
@@ -556,19 +574,45 @@ function register(api: any): void {
         return { ingested: true };
       },
 
-      // Local truncation: keep last keepTurns turns safely
       async assemble({ messages }: { messages: any[] }) {
         const keepTurns = config!.keepTurns;
         const keepMessages = keepTurns * 2;
         let finalMessages = messages;
-        if (Array.isArray(messages) && messages.length > keepMessages) {
-          let candidateIndex = messages.length - keepMessages;
+
+        // Strip out EXTERNAL_UNTRUSTED_CONTENT from user messages (temporarily disabled)
+        /*
+        if (Array.isArray(finalMessages)) {
+          finalMessages = finalMessages.map(msg => {
+            if (msg.role === "user") {
+              if (Array.isArray(msg.content)) {
+                const newContent = msg.content.map((part: any) => {
+                  if (part.type === "text" && typeof part.text === "string" && part.text.includes("<<<EXTERNAL_UNTRUSTED_CONTENT")) {
+                    let cleanedText = part.text.replace(/<file name="[^"]+" mime="[^"]+">[\s\S]*?<<<EXTERNAL_UNTRUSTED_CONTENT[\s\S]*?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>\s*<\/file>/g, "\n\n[Sistema: file ricevuto ma lettura automatica disabilitata per risparmiare token. Il contenuto è stato bloccato.]\n\n");
+                    cleanedText = cleanedText.replace(/<<<EXTERNAL_UNTRUSTED_CONTENT[\s\S]*?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>/g, "\n\n[Sistema: contenuto untrusted bloccato per risparmiare token.]\n\n");
+                    return { ...part, text: cleanedText };
+                  }
+                  return part;
+                });
+                return { ...msg, content: newContent };
+              } else if (typeof msg.content === "string" && msg.content.includes("<<<EXTERNAL_UNTRUSTED_CONTENT")) {
+                let cleanedText = msg.content.replace(/<file name="[^"]+" mime="[^"]+">[\s\S]*?<<<EXTERNAL_UNTRUSTED_CONTENT[\s\S]*?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>\s*<\/file>/g, "\n\n[Sistema: file ricevuto ma lettura automatica disabilitata per risparmiare token. Il contenuto è stato bloccato.]\n\n");
+                cleanedText = cleanedText.replace(/<<<EXTERNAL_UNTRUSTED_CONTENT[\s\S]*?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>/g, "\n\n[Sistema: contenuto untrusted bloccato per risparmiare token.]\n\n");
+                return { ...msg, content: cleanedText };
+              }
+            }
+            return msg;
+          });
+        }
+        */
+
+        if (Array.isArray(finalMessages) && finalMessages.length > keepMessages) {
+          let candidateIndex = finalMessages.length - keepMessages;
           
           // SAFE TRUNCATION: Gemini will throw 400 INVALID_ARGUMENT if we cut history in the
           // middle of a function_call / function_response pair, or if the history starts with
           // an orphaned model/tool message. We must walk forward until we find a CLEAN user message.
-          while (candidateIndex < messages.length) {
-            const msg = messages[candidateIndex];
+          while (candidateIndex < finalMessages.length) {
+            const msg = finalMessages[candidateIndex];
             if (msg.role === "user") {
               // Check if it's a clean user message (no tool_result/functionResponse parts)
               const hasToolResult = Array.isArray(msg.content) 
@@ -581,7 +625,7 @@ function register(api: any): void {
             candidateIndex++;
           }
 
-          finalMessages = messages.slice(candidateIndex);
+          finalMessages = finalMessages.slice(candidateIndex);
           dlog(`assemble(): safely truncated ${messages.length} → ${finalMessages.length} messages (keepTurns=${keepTurns})`);
         }
         return { messages: finalMessages, estimatedTokens: 0 };
