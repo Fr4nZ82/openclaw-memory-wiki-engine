@@ -505,7 +505,7 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
         maxOutputTokens: 16384,
       },
     }),
-    signal: AbortSignal.timeout(15000),
+    signal: AbortSignal.timeout(60000),
   });
 
   if (!response.ok) {
