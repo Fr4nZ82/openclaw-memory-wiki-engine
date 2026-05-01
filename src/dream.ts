@@ -431,8 +431,13 @@ export async function updateWikiPages(
       // Pass the target object as { topic, title } instead of the old owner structure
       const targetEntity = { topic, title: pageTitle };
       
-      const updated = await semanticMergePage(api, config, targetEntity, factsForTopic, logger);
-      if (updated) pagesUpdated++;
+      try {
+        const updated = await semanticMergePage(api, config, targetEntity, factsForTopic, logger);
+        if (updated) pagesUpdated++;
+      } catch (e) {
+        logger.error(`[Dream REM] Failed to compile wiki page for topic "${topic}": ${e}`);
+        // Continuing to the next topic to ensure topic-index.json still gets updated
+      }
     }
   }
 
