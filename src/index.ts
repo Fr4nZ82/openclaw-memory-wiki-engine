@@ -791,34 +791,48 @@ function register(api: any): void {
       description: "Runs a memory consolidation cycle (pass 'rem' for deep)",
       acceptsArgs: true,
       requireAuth: false,
-      handler: async (ctx: { args?: string }) => {
+      handler: async (ctx: { args?: string; sessionKey?: string }) => {
         const database = getDb();
         if (!database || !config) return { text: "Plugin not initialized" };
 
         const type = ctx.args?.trim().toLowerCase() === "rem" ? "rem" : "light";
-        const report =
-          type === "rem"
-            ? await dreamRem(api, database, config, ocLog)
-            : await dreamLight(database, config, ocLog);
-
-        return {
-          text: [
-            `🌙 Dream ${report.type} complete`,
-            `- Captures processed: ${report.capturesProcessed}`,
-            `- Facts created: ${report.factsCreated}`,
-            `- Superseded: ${report.factsSuperseded}`,
-            report.type === "rem"
-              ? `- De-duplicated: ${report.factsDeduplicated}\n` +
-                `- Decayed: ${report.factsDecayed}\n` +
-                `- Wiki pages updated: ${report.wikiPagesUpdated}`
-              : "",
-            report.errors.length > 0
-              ? `⚠️ Errors: ${report.errors.length}`
-              : "",
-          ]
-            .filter(Boolean)
-            .join("\n"),
-        };
+        
+        if (type === "rem") {
+          // Esegue in background per non bloccare il polling di Telegram (può durare minuti)
+          dreamRem(api, database, config, ocLog).then(report => {
+            if (api.sendMessage && ctx.sessionKey) {
+              const text = [
+                `🌙 Dream REM complete`,
+                `- Captures processed: ${report.capturesProcessed}`,
+                `- Facts created: ${report.factsCreated}`,
+                `- Superseded: ${report.factsSuperseded}`,
+                `- De-duplicated: ${report.factsDeduplicated}`,
+                `- Decayed: ${report.factsDecayed}`,
+                `- Wiki pages updated: ${report.wikiPagesUpdated}`,
+                report.errors.length > 0 ? `⚠️ Errors: ${report.errors.length}` : "",
+              ].filter(Boolean).join("\n");
+              api.sendMessage(ctx.sessionKey, text).catch(() => {});
+            }
+          }).catch(e => {
+            ocLog.error(`[Dream] Manual Dream REM failed: ${e}`);
+            if (api.sendMessage && ctx.sessionKey) {
+              api.sendMessage(ctx.sessionKey, `⚠️ Error during Dream REM: ${e}`).catch(() => {});
+            }
+          });
+          
+          return { text: "🌙 Deep REM avviato in background. Potrebbe volerci qualche minuto, ti avviserò al termine." };
+        } else {
+          const report = await dreamLight(database, config, ocLog);
+          return {
+            text: [
+              `🌙 Dream Light complete`,
+              `- Captures processed: ${report.capturesProcessed}`,
+              `- Facts created: ${report.factsCreated}`,
+              `- Superseded: ${report.factsSuperseded}`,
+              report.errors.length > 0 ? `⚠️ Errors: ${report.errors.length}` : "",
+            ].filter(Boolean).join("\n"),
+          };
+        }
       },
     });
 

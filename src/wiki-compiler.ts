@@ -223,6 +223,8 @@ Return a JSON object with this exact structure:
   "aliases": ["Alternative", "Names", "For", "This", "Topic"]
 }
 
+IMPORTANT: Ensure the JSON is strictly valid. Since `mergedBody` contains a long markdown text, you MUST properly escape all double quotes (\") and newlines (\\n) inside strings.
+
 Known slugs for wikilinks:
 ${knownSlugs.length > 0 ? knownSlugs.join(", ") : "None yet."}
 
