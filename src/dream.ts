@@ -401,25 +401,44 @@ export async function updateWikiPages(
   // 2. Find all unique topics with enough facts
   // We extract all active facts, expand their topics array, and count.
   const allFacts = db.prepare(`SELECT * FROM facts WHERE is_active = 1 ORDER BY fact_type, updated_at DESC`).all() as Fact[];
-  const topicStats: Record<string, { fact_count: number; rule_count: number; owner_ids: Set<string> }> = {};
+  const topicStats: Record<string, { fact_count: number; rule_count: number; owner_ids: Set<string>; max_updated_at: number }> = {};
   
   for (const f of allFacts) {
     const tList = jsonToTopics(f.topics);
+    const factTime = new Date(f.updated_at).getTime();
     for (const t of tList) {
       const topicLower = t.toLowerCase();
       // Exclude operational blacklist topics
       if (["general", "chat", "saluto", "sistema", "debug"].includes(topicLower)) continue;
       
-      if (!topicStats[topicLower]) topicStats[topicLower] = { fact_count: 0, rule_count: 0, owner_ids: new Set() };
+      if (!topicStats[topicLower]) topicStats[topicLower] = { fact_count: 0, rule_count: 0, owner_ids: new Set(), max_updated_at: 0 };
       topicStats[topicLower].fact_count++;
       if (f.fact_type === "rule") topicStats[topicLower].rule_count++;
       topicStats[topicLower].owner_ids.add(f.owner_id);
+      if (factTime > topicStats[topicLower].max_updated_at) {
+        topicStats[topicLower].max_updated_at = factTime;
+      }
     }
   }
 
   for (const [topic, stats] of Object.entries(topicStats)) {
     // Thresholds: 3+ facts OR 1+ rule OR 2+ distinct owners
     if (stats.fact_count >= 3 || stats.rule_count >= 1 || stats.owner_ids.size >= 2) {
+      const fileName = `${topic.toLowerCase().replace(/[^a-z0-9]+/g, "_")}.md`;
+      const relativePath = path.join("pages", fileName);
+      const filePath = path.join(config.wikiPath, relativePath);
+      
+      let pageMtime = 0;
+      if (fs.existsSync(filePath)) {
+        pageMtime = fs.statSync(filePath).mtime.getTime();
+      }
+      
+      // Skip if the wiki page is newer than the most recently updated fact for this topic
+      if (pageMtime > stats.max_updated_at) {
+        if (config.debug) logger.debug(`[Dream REM] Skipping ${topic}, wiki page is up to date`);
+        continue;
+      }
+
       // Load facts for this topic
       const factsForTopic = allFacts.filter(f => {
         const lowerTopics = jsonToTopics(f.topics).map(t => t.toLowerCase());
