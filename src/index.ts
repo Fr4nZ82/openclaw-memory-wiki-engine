@@ -795,7 +795,7 @@ function register(api: any): void {
         const database = getDb();
         if (!database || !config) return { text: "Plugin not initialized" };
 
-        const type = ctx.args?.trim() === "rem" ? "rem" : "light";
+        const type = ctx.args?.trim().toLowerCase() === "rem" ? "rem" : "light";
         const report =
           type === "rem"
             ? await dreamRem(api, database, config, ocLog)
