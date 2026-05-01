@@ -55,7 +55,7 @@ export async function syncHumanEdits(
           const wikiContent = fs.readFileSync(wikiFilePath, "utf-8");
           const shadowContent = fs.readFileSync(shadowFilePath, "utf-8");
 
-          await extractDelta(api, db, wikiContent, shadowContent, relativePath, logger);
+          await extractDelta(api, db, config, wikiContent, shadowContent, relativePath, logger);
 
           // Update shadow to match the newly ingested human edits
           fs.writeFileSync(shadowFilePath, wikiContent, "utf-8");
@@ -73,6 +73,7 @@ export async function syncHumanEdits(
 async function extractDelta(
   api: any,
   db: Database.Database,
+  config: PluginConfig,
   newContent: string,
   oldContent: string,
   relativePath: string,
