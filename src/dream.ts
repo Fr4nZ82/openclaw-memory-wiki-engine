@@ -484,6 +484,32 @@ function updateTopicIndex(
   const indexPath = path.join(config.wikiPath, "_meta", "topic-index.json");
   fs.mkdirSync(path.dirname(indexPath), { recursive: true });
   fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf-8");
+
+  // Generate index.md in the root of the wiki
+  const indexMdPath = path.join(config.wikiPath, "index.md");
+  const sortedTopics = Object.keys(index).sort();
+  
+  const indexMdLines = [
+    "---",
+    "title: Indice Wiki",
+    "description: Indice generale della memoria di Samvise",
+    `updated: ${new Date().toISOString().split("T")[0]}`,
+    "---",
+    "# Indice della Memoria",
+    "",
+    "Questo indice è generato automaticamente dal Memory Wiki Engine in base agli argomenti consolidati.",
+    "",
+    "## Argomenti",
+    ""
+  ];
+
+  for (const topic of sortedTopics) {
+    const slug = topic.replace(/[^a-z0-9]+/g, "_");
+    const title = topic.charAt(0).toUpperCase() + topic.slice(1);
+    indexMdLines.push(`- [[${slug}|${title}]]`);
+  }
+  
+  fs.writeFileSync(indexMdPath, indexMdLines.join("\n"), "utf-8");
 }
 
 // MEMORY.md logic has been completely removed in V2 architecture

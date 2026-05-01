@@ -446,9 +446,9 @@ function writeClassifierAudit(prompt: string, model: string): void {
       provider: "google",
       model,
       imagesCount: 0,
-      systemPrompt: prompt.substring(0, 500) + (prompt.length > 500 ? "..." : ""),
+      systemPrompt: prompt,
       messagesCount: 1,
-      messages: [{ role: "user", content: prompt.substring(0, 200) + "..." }],
+      messages: [{ role: "user", content: prompt }],
     };
 
     let history: unknown[] = [];
