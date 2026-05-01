@@ -18,13 +18,31 @@ function getShadowPath(config: PluginConfig, relativePath: string): string {
  * Scans the wiki for human edits (mtime > shadow mtime).
  * Extracts delta facts using Gemini and updates the DB.
  */
+// Helper per parsi sicuro
+function parseJsonFromLlm(response: any, component: string, logger: any): any {
+  if (typeof response !== "string") return response;
+  
+  let cleaned = response.trim();
+  if (cleaned.startsWith("```json")) {
+    cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+  } else if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+  }
+  
+  try {
+    return JSON.parse(cleaned);
+  } catch (err) {
+    logger.error(`[Wiki Compiler] JSON parse failed in ${component}! Raw response was:\n---\n${response}\n---\n`);
+    throw err;
+  }
+}
+
 export async function syncHumanEdits(
   api: any,
   db: Database.Database,
   config: PluginConfig,
   logger: any
 ): Promise<number> {
-
   let humanEditsFound = 0;
   const shadowBase = path.join(config.wikiPath, ".shadow");
   if (!fs.existsSync(shadowBase)) fs.mkdirSync(shadowBase, { recursive: true });
@@ -99,7 +117,7 @@ ${newContent.substring(0, 4000)}
     if (config.debug) logger.debug(`[Wiki Compiler] Extracting delta from ${relativePath} with LLM...`);
     let response = await callLlmTask(api, prompt);
 
-    const facts = JSON.parse(typeof response === "string" ? response : JSON.stringify(response));
+    const facts = parseJsonFromLlm(response, "extractDelta", logger);
     if (Array.isArray(facts) && facts.length > 0) {
       const { topicsToJson } = await import("./utils");
       
@@ -222,7 +240,7 @@ ${factsList}
       if (config.debug) logger.debug(`[Wiki Compiler] Requesting semantic merge for ${targetEntity.title} from LLM...`);
       const response = await callLlmTask(api, prompt);
       
-      const parsed = typeof response === "string" ? JSON.parse(response) : response;
+      const parsed = parseJsonFromLlm(response, `semanticMergePage(${relativePath})`, logger);
       if (parsed.mergedBody) mergedBody = parsed.mergedBody;
       if (parsed.description) description = parsed.description;
       if (Array.isArray(parsed.aliases)) aliases = parsed.aliases;
