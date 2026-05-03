@@ -25,6 +25,8 @@ import type { PluginConfig } from "./config";
 // ---------------------------------------------------------------------------
 
 /** A permanent fact in the database */
+export type FactType = "fact" | "preference" | "rule" | "episode" | "bio" | "internal";
+
 export interface Fact {
   id: string;
   text: string;
@@ -33,7 +35,7 @@ export interface Fact {
   sender_id: string;
   owner_type: "user" | "group" | "global";
   owner_id: string;
-  fact_type: "fact" | "preference" | "rule" | "episode";
+  fact_type: FactType;
   /** Serialized vector embedding (Float32, 768 dims) */
   embedding: Buffer | null;
   confidence: number;
@@ -54,7 +56,7 @@ export interface SessionCapture {
   sender_id: string;
   owner_type: "user" | "group" | "global";
   owner_id: string;
-  fact_type: "fact" | "preference" | "rule" | "episode";
+  fact_type: FactType;
   is_internal: number;
   captured_at: string;
   promoted: number; // 0=pending, 1=promoted, 2=discarded

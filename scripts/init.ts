@@ -25,7 +25,7 @@ import * as crypto from "crypto";
 
 interface ExtractedFact {
   fact_text: string;
-  fact_type: "fact" | "preference" | "rule" | "episode";
+  fact_type: "fact" | "preference" | "rule" | "episode" | "bio" | "internal";
   owner_type: "user" | "group" | "global";
   owner_id: string;
   topics: string[];
@@ -315,10 +315,12 @@ Rules for owner_id:
 - owner_id must be lowercase
 
 Rules for fact_type:
-- "fact" — objective, persistent information
-- "preference" — taste, like/dislike
-- "rule" — changes the assistant's behavior
-- "episode" — temporary state (medical recovery, currently reading a book)
+- fact: general objective information.
+- bio: biographical data, family relationships, personal history.
+- preference: tastes, likes, dislikes.
+- rule: behavioral rules, prohibitions, system instructions.
+- episode: temporary events, emotional states, specific occurrences.
+- internal: technical notes, debug info, system status.
 
 IMPORTANT language rule:
 - Write each fact_text in the SAME LANGUAGE as the source document.
@@ -536,9 +538,11 @@ To verify facts were inserted: npx tsx scripts/enroll.ts --dump
     for (const fact of facts) {
       const typeEmoji = {
         fact: "📌",
+        bio: "👤",
         preference: "💚",
         rule: "⚠️",
         episode: "📅",
+        internal: "⚙️",
       }[fact.fact_type] || "•";
 
       console.log(`  ${typeEmoji} [${fact.owner_type}/${fact.owner_id}] ${fact.fact_text}`);

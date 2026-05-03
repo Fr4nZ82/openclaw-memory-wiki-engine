@@ -16,7 +16,7 @@ const log = dbg("classifier");
  *   - Whether it's worth remembering (is_memorable)
  *   - What exactly to remember (fact_text)
  *   - Who the fact belongs to (owner attribution)
- *   - What type it is (fact, preference, rule, episode)
+ *   - What type it is (fact, preference, rule, episode, bio, internal)
  *
  * Uses OpenClaw's `llm-task` with Gemini Flash — fast and cheap.
  * Receives a sliding window of the last N messages for context.
@@ -25,6 +25,7 @@ const log = dbg("classifier");
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
 import { jsonToTopics } from "./utils";
+import type { FactType } from "./db";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -48,7 +49,7 @@ export interface ClassificationResult {
   fact_text: string;
 
   /** Fact type */
-  fact_type: "fact" | "preference" | "rule" | "episode";
+  fact_type: FactType;
 
   /** Who the fact belongs to: individual user, group, or global */
   owner_type: "user" | "group" | "global";
@@ -195,10 +196,14 @@ Analyze the message and respond with valid JSON:
    "last week" → concrete date.
 
 6. **fact_type**:
-   - "fact" — objective information (Alice does karate)
-   - "preference" — taste, preference (doesn't like pesto)
-   - "rule" — rule that changes the assistant's behavior (max 2h computer)
-   - "episode" — temporary event (I'm reading a book)
+   - fact: general objective information.
+   - bio: biographical data, family relationships, personal history.
+   - preference: tastes, likes, dislikes.
+   - rule: behavioral rules, prohibitions, system instructions.
+   - episode: temporary events, emotional states, specific occurrences.
+   - internal: technical notes, debug info, system status (ONLY if the message is technical).
+
+If fact_type is "internal", is_internal MUST be true.
 
 7. **owner_type and owner_id**: who OWNS the fact (not who says it).
    owner_id must be the CANONICAL NAME (first name, lowercase) from the known users list.
@@ -673,7 +678,7 @@ function normalizeTopics(raw: any): string[] {
  * Validates fact_type — only allowed values.
  */
 function validateFactType(raw: any): ClassificationResult["fact_type"] {
-  const valid = ["fact", "preference", "rule", "episode"] as const;
+  const valid = ["fact", "preference", "rule", "episode", "bio", "internal"] as const;
   return valid.includes(raw) ? raw : "fact";
 }
 
