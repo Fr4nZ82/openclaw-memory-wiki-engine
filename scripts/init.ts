@@ -19,13 +19,15 @@ import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
 
+import type { FactType } from "../src/db";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 interface ExtractedFact {
   fact_text: string;
-  fact_type: "fact" | "preference" | "rule" | "episode" | "bio" | "internal";
+  fact_type: FactType;
   owner_type: "user" | "group" | "global";
   owner_id: string;
   topics: string[];
