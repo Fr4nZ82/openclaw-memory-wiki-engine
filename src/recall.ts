@@ -29,6 +29,7 @@ import {
   cosineSimilarity,
   deserializeEmbedding,
 } from "./embedding";
+import { isAdminMember } from "./users-registry";
 
 const log = dbg("recall");
 
@@ -116,23 +117,47 @@ export function resolveAllSenderIds(
 // ---------------------------------------------------------------------------
 
 /**
- * Applies block-level ACL redaction.
+ * Applies block-level ACL redaction to wiki page content.
+ *
+ * Rules:
+ *   - If wikiauth sender matches the current sender → show
+ *   - If type="user" and owner matches canonical ID → show
+ *   - If type="group" and canonical ID is a member of that group → show
+ *   - If sender="init" and current user is admin → show (init bypass — ADR-020)
+ *   - Otherwise → redact
  */
 function applyAclRedaction(db: Database.Database, content: string, senderId: string, canonicalId: string): string {
   const aclRegex = /<wikiauth\s+type="([^"]+)"\s+owner="([^"]+)"\s+sender="([^"]+)">([\s\S]*?)<\/wikiauth>/g;
-  
+
+  // Cache admin check (once per recall call)
+  let isAdmin: boolean | null = null;
+  const checkAdmin = () => {
+    if (isAdmin === null) isAdmin = isAdminMember(db, senderId) || isAdminMember(db, canonicalId);
+    return isAdmin;
+  };
+
   return content.replace(aclRegex, (match, type, owner, sender, innerText) => {
-    if (sender === senderId) return innerText;
+    // Direct sender match
+    if (sender === senderId || sender === canonicalId) return innerText;
+    // Owner match for user-scoped facts
     if (type === "user" && owner === canonicalId) return innerText;
+    // Group membership check (via group_members join table)
     if (type === "group") {
-      const groupRow = db.prepare("SELECT members FROM user_groups WHERE id = ?").get(owner) as { members: string } | undefined;
-      if (groupRow) {
-        try {
-          const members = JSON.parse(groupRow.members) as string[];
-          if (members.includes(canonicalId)) return innerText;
-        } catch {}
-      }
+      const memberRow = db.prepare(
+        `SELECT 1 FROM group_members WHERE group_id = ? AND sender_id = ?`
+      ).get(owner, senderId);
+      if (memberRow) return innerText;
+      // Also check by canonical name lookup
+      const byCanonical = db.prepare(
+        `SELECT 1 FROM group_members gm
+         JOIN users u ON gm.sender_id = u.sender_id
+         WHERE gm.group_id = ?
+           AND LOWER(JSON_EXTRACT(u.names, '$[0]')) = ?`
+      ).get(owner, canonicalId);
+      if (byCanonical) return innerText;
     }
+    // Init bypass: admin members see init-sourced facts (ADR-020)
+    if (sender === "init" && checkAdmin()) return innerText;
     return `[REDACTED]`;
   });
 }
@@ -552,8 +577,14 @@ function searchBM25(
 
   if (!ftsQuery) return results;
 
+  // Check if sender is admin (for init facts bypass)
+  const senderIsAdmin = isAdminMember(db, canonicalId);
+
   // Build dynamic IN clause for sender_ids
   const senderPlaceholders = allSenderIds.map(() => '?').join(', ');
+
+  // Admin bypass: include init facts for admin users (ADR-020)
+  const initClause = senderIsAdmin ? ` OR f.sender_id = 'init'` : '';
 
   const rows = db
     .prepare(
@@ -566,7 +597,7 @@ function searchBM25(
            f.owner_id = ? OR
            f.sender_id IN (${senderPlaceholders}) OR
            f.owner_type = 'global' OR
-           f.owner_type = 'group'
+           f.owner_type = 'group'${initClause}
          )
        ORDER BY score
        LIMIT ?`
@@ -608,8 +639,14 @@ function searchVector(
 ): Map<string, number> {
   const results = new Map<string, number>();
 
+  // Check if sender is admin (for init facts bypass)
+  const senderIsAdmin = isAdminMember(db, canonicalId);
+
   // Build dynamic IN clause for sender_ids
   const senderPlaceholders = allSenderIds.map(() => '?').join(', ');
+
+  // Admin bypass: include init facts for admin users (ADR-020)
+  const initClause = senderIsAdmin ? ` OR sender_id = 'init'` : '';
 
   // Load all active facts with embeddings
   const rows = db
@@ -621,7 +658,7 @@ function searchVector(
            owner_id = ? OR
            sender_id IN (${senderPlaceholders}) OR
            owner_type = 'global' OR
-           owner_type = 'group'
+           owner_type = 'group'${initClause}
          )`
     )
     .all(canonicalId, ...allSenderIds) as Array<{ id: string; embedding: Buffer }>;

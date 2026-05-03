@@ -5,14 +5,16 @@
  * This file is the "wiring" — actual logic lives in specialized modules.
  *
  * Modules:
- *   config.ts     → configuration with defaults
- *   db.ts         → SQLite schema and initialization
- *   classifier.ts → message classification with Gemini Flash
- *   capture.ts    → capture pipeline (archive + classify + save)
- *   recall.ts     → context injection into the prompt
- *   embedding.ts  → Ollama client for vector embeddings
- *   supersede.ts  → fact supersedence logic
- *   dream.ts      → memory consolidation (light + REM)
+ *   config.ts          → configuration with defaults
+ *   db.ts              → SQLite schema and initialization
+ *   classifier.ts      → message classification with Gemini Flash
+ *   capture.ts         → capture pipeline (archive + classify + save)
+ *   recall.ts          → context injection into the prompt
+ *   embedding.ts       → Ollama client for vector embeddings
+ *   supersede.ts       → fact supersedence logic
+ *   dream.ts           → memory consolidation (light + REM)
+ *   users-registry.ts  → USERS.md parser, DB sync, prompt context builder
+ *   prompt-patcher.ts  → declarative system prompt modification
  *
  * Registered hooks:
  *   - message_received    → captures user messages
@@ -44,6 +46,14 @@ import {
 import { buildRecallContext, resolveCanonicalId } from "./recall";
 import { dreamLight, dreamRem } from "./dream";
 import {
+  loadRegistry,
+  syncUsersToDb,
+  buildUsersContext,
+  resolveUsersFilePath,
+  MULTI_USER_DIRECTIVE,
+} from "./users-registry";
+import { applyPromptPatches } from "./prompt-patcher";
+import {
   wikiIngest,
   wikiLint,
   wikiSync,
@@ -61,6 +71,8 @@ let db: Database.Database | null = null;
 let config: PluginConfig | null = null;
 let dreamTimer: ReturnType<typeof setInterval> | null = null;
 let remTimer: ReturnType<typeof setTimeout> | null = null;
+let usersSynced = false;
+let pluginApi: any = null;  // Cached api reference for USERS.md path resolution
 
 /**
  * Sender ID from the most recent before_prompt_build call.
@@ -111,6 +123,7 @@ function register(api: any): void {
   // Read plugin config (from openclaw.json) and merge with defaults
   const userConfig = api.pluginConfig ?? api.getPluginConfig?.() ?? {};
   config = resolveConfig(userConfig);
+  pluginApi = api;
 
   // Debug toggle: plugin config takes precedence over MWE_DEBUG env var
   if (typeof userConfig.debug === "boolean") {
@@ -291,6 +304,25 @@ function register(api: any): void {
       if (!database || !config) {
         dlog(`before_prompt_build SKIPPED: db=${!!database}, config=${!!config}`);
         return;
+      }
+
+      // ------------------------------------------------------------------
+      // USERS.md auto-sync (once per gateway lifecycle, or on file change)
+      // ------------------------------------------------------------------
+      if (!usersSynced) {
+        try {
+          const usersPath = resolveUsersFilePath(pluginApi);
+          const registry = loadRegistry(usersPath);
+          if (registry.users.length > 0) {
+            syncUsersToDb(database, registry);
+            ocLog.info(`[Users] Synced ${registry.users.length} users, ${registry.groups.length} groups from USERS.md`);
+            usersSynced = true;
+          } else {
+            dlog(`[Users] USERS.md not found or empty at ${usersPath}`);
+          }
+        } catch (err) {
+          dlog(`[Users] Sync error: ${err}`);
+        }
       }
 
       try {
@@ -545,9 +577,41 @@ function register(api: any): void {
           senderId
         );
 
-        // Return context for OpenClaw to inject (standard SDK pattern — ADR-013)
+        // Return context for OpenClaw to inject (standard SDK pattern — ADR-013/ADR-020)
         dlog(`[Recall] ${recallCtx.estimatedTokens} tokens injected — wiki: ${recallCtx.details.wikiPagesMatched}, facts: ${recallCtx.details.factsMatched}, captures: ${recallCtx.details.capturesFound}, vector: ${recallCtx.details.vectorSearchUsed}`);
-        return { prependContext: recallCtx.systemContext };
+
+        // ---------------------------------------------------------------
+        // Build the return object:
+        //   prependContext: recall context (wiki + facts + captures)
+        //   systemPrompt:   patched prompt + <users_context> + multi-user directive
+        // ---------------------------------------------------------------
+        const result: Record<string, string> = {
+          prependContext: recallCtx.systemContext,
+        };
+
+        // Apply prompt patches (declarative JSON) if configured
+        const patchesFile = config.promptPatchesFile;
+        let basePrompt = event.prompt ?? "";
+        if (patchesFile && basePrompt) {
+          basePrompt = applyPromptPatches(basePrompt, patchesFile);
+          dlog(`[Prompt] Patches applied from ${patchesFile}`);
+        }
+
+        // Inject <users_context> and Multi-User directive
+        const usersPath = resolveUsersFilePath(pluginApi);
+        const registry = loadRegistry(usersPath);
+        if (registry.users.length > 0 && basePrompt) {
+          const usersCtx = buildUsersContext(registry, senderId);
+          basePrompt = basePrompt + "\n\n" + usersCtx + "\n\n" + MULTI_USER_DIRECTIVE;
+          dlog(`[Prompt] <users_context> injected for sender=${senderId}`);
+        }
+
+        // Only override systemPrompt if we actually modified it
+        if (basePrompt && (patchesFile || registry.users.length > 0)) {
+          result.systemPrompt = basePrompt;
+        }
+
+        return result;
       } catch (error) {
         ocLog.warn("[Recall] Error injecting context:", error);
         dlog(`[Recall] UNHANDLED ERROR: ${error}`);

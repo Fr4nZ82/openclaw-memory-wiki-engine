@@ -60,6 +60,9 @@ export interface PluginConfig {
 
   /** Enable debug logging across the engine */
   debug: boolean;
+
+  /** Optional path to a JSON file with declarative system prompt patches */
+  promptPatchesFile?: string;
 }
 
 // ---------------------------------------------------------------------------

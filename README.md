@@ -1,6 +1,6 @@
 # openclaw-memory-wiki-engine
 
-A sovereign memory plugin for [OpenClaw](https://docs.openclaw.ai/) that replaces the built-in `memory-core` with a 5-layer architecture: **Wiki → Facts DB → Session Captures → MEMORY.md → Archive**.
+A sovereign memory plugin for [OpenClaw](https://docs.openclaw.ai/) that replaces the built-in `memory-core` with a 5-layer architecture: **Wiki → Facts DB → Session Captures → Archive**.
 
 Instead of dumping everything into a flat memory store, this plugin **classifies** each message by topic, **captures** only meaningful facts, **builds** a searchable auto-generated wiki, and **consolidates** knowledge overnight via a dream engine.
 
@@ -97,33 +97,50 @@ openclaw gateway restart
 > generates slug-based summaries on `/new`/`/reset`. Since this plugin already persists
 > all facts, captures, and wiki pages, those LLM calls are pure waste.
 
-### User enrollment
+### User enrollment (USERS.md)
 
-The plugin supports multi-user memory with group-based scoping. After installation, enroll your users and groups using the CLI tool:
+The plugin supports multi-user memory with group-based scoping. Users and groups are declared in a single `USERS.md` file in the workspace — **no separate JSON or CLI scripts needed**.
 
-**1. Create a `users.json` file** (see `scripts/users.example.json`):
+**1. Create `USERS.md` in your workspace** (e.g. `~/.openclaw/workspace/USERS.md`):
 
-```json
-{
-  "users": [
-    { "sender_id": "alice", "names": ["Alice"] },
-    { "sender_id": "bob", "names": ["Bob", "Roberto"] },
-    { "sender_id": "charlie", "names": ["Charlie", "Carlo"] }
-  ],
-  "groups": [
-    {
-      "id": "family",
-      "name": "Family",
-      "description": "Core family group",
-      "scope": [
-        "Spesa e lista della spesa",
-        "Regole della casa (orari, turni)",
-        "Piani condivisi (vacanze, cene, uscite)"
-      ],
-      "members": ["alice", "bob", "charlie"]
-    }
-  ]
-}
+```markdown
+# USERS
+
+## Gruppi
+
+### admin
+- permissions: full
+- description: Full access. Can invoke sub-agents, exec, system, cron.
+
+### family
+- description: Core family group
+- permissions: chat, ask_admin, calendar, memory
+- scope: Groceries and shopping list; House rules; Shared plans
+
+---
+
+## alice
+- sender_id: 123456789
+- channel: telegram
+- aliases: Alicia, Ali
+- groups: family, admin
+- relazioni: partner of Bob, mother of Charlie
+- born: 1990-01-15
+
+### Profilo
+Direct communication, no sugar-coating. Practical solutions > theoretical ones.
+
+---
+
+## bob
+- sender_id: 987654321
+- channel: telegram
+- aliases: Roberto
+- groups: family
+- relazioni: partner of Alice, father of Charlie
+
+### Profilo
+Friendly and patient. Prefers step-by-step explanations.
 ```
 
 ### Users
@@ -131,45 +148,34 @@ The plugin supports multi-user memory with group-based scoping. After installati
 | Field | Required | Description |
 |-------|----------|-------------|
 | `sender_id` | ✅ | User identifier as seen by OpenClaw (Telegram numeric ID, Discord ID, etc.) |
-| `names` | ✅ | Array of names. **First = canonical** (used as `owner_id` in facts and wiki page slug). Others = aliases for cross-user attribution. |
+| `aliases` | ❌ | Comma-separated alternative names for cross-user attribution |
+| `groups` | ✅ | Comma-separated group slugs (must match `### <slug>` under `## Gruppi`) |
+| `channel` | ❌ | Primary channel (informational) |
+| `relazioni` | ❌ | Free-form relationships with other users (used in roster for name disambiguation) |
+| `restrictions` | ❌ | Comma-separated permission overrides (e.g., `no_exec, no_system`) |
+| `born` | ❌ | Birth date (used by recall for contextual info) |
+| `### Profilo` | ✅ | Multi-line behavioral profile, injected only for the current sender |
 
-> The classifier receives all names in its prompt. When a user says "Francesco likes coffee", the classifier looks up "Francesco" in the known users list, finds it's an alias for "Frodo", and sets `owner_id: "frodo"`.
+> The **slug** (H2 heading, e.g. `## alice`) becomes the canonical name — used as `owner_id` in facts. The classifier resolves aliases automatically.
 
 ### Groups
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `id` | ✅ | Unique group identifier (used in DB and wiki paths) |
-| `name` | ✅ | Human-readable group name |
-| `description` | ❌ | Optional description |
-| `scope` | ❌ | Array of strings: what types of facts belong to this group (vs individual profiles). Used by the dream engine to generate the "Scope" section in group wiki pages. |
-| `members` | ✅ | Array of `sender_id` references (must be defined in `users` first) |
+| `### <slug>` | ✅ | Group identifier (H3 under `## Gruppi`) |
+| `permissions` | ✅ | Comma-separated base permissions for all group members |
+| `description` | ❌ | Human-readable description |
+| `scope` | ❌ | Semicolon-separated topic scopes for group-level facts |
 
-> **Note**: `sender_id` must match the ID that OpenClaw assigns to incoming messages. For Telegram this is typically the numeric user ID; check your channel's message metadata to confirm.
+> Group membership is declared on the **user side** (field `groups:`), not on the group. The plugin inverts the relationship to populate the `group_members` DB table.
 
-**2. Run the enrollment script:**
+**2. Auto-sync:** The plugin automatically parses `USERS.md` and syncs to the database on the first agent turn after gateway startup. No manual enrollment steps required.
+
+**3. Legacy CLI (optional, for debugging):**
 
 ```bash
-cd openclaw-memory-wiki-engine
-
-# Import users and groups
-npx tsx scripts/enroll.ts users.json
-
-# Verify what's in the DB
+# Dump current DB state
 npx tsx scripts/enroll.ts --dump
-
-# Use a custom DB path if needed
-npx tsx scripts/enroll.ts users.json --db /path/to/engine.db
-```
-
-The operation is **idempotent** — you can edit `users.json` and re-run at any time. Users/members present in the DB but removed from the file will be cleaned up automatically.
-
-**3. Edit cycle:** to update users/groups later, dump → edit → re-import:
-
-```bash
-npx tsx scripts/enroll.ts --dump > users.json
-# edit users.json
-npx tsx scripts/enroll.ts users.json
 ```
 
 ## Configuration
@@ -211,6 +217,7 @@ All settings are optional — defaults work out of the box. Configure via `openc
 | `dreamRemTime` | `03:00` | Time for nightly deep dream (HH:MM) |
 | `minMessageLength` | `10` | Min chars to classify a message |
 | `maxMessageLength` | `2000` | Max chars sent to classifier |
+| `promptPatchesFile` | *(none)* | Path to a JSON file with declarative system prompt patches (see [Prompt Patcher](#prompt-patcher)) |
 
 ### Ollama setup (optional, recommended)
 
@@ -271,6 +278,35 @@ Before each prompt, the plugin injects relevant context with 5 priority layers:
 4. **Session captures** — current session context
 
 Total budget is ~1100 tokens (configurable), distributed across layers with graceful truncation.
+
+### Prompt Patcher
+
+The plugin supports **declarative system prompt modification** via an external JSON file. This allows removing or replacing sections of the OpenClaw system prompt without code changes.
+
+Configure via `pluginConfig`:
+
+```json
+{
+  "promptPatchesFile": "~/.openclaw/workspace/.openclaw/prompt-patches.json"
+}
+```
+
+Patch file format:
+
+```json
+{
+  "remove": [
+    { "id": "self-update", "match": "## OpenClaw Self-Update", "type": "section" }
+  ],
+  "replace": [
+    { "id": "my-edit", "target": "old text", "replacement": "new text" }
+  ]
+}
+```
+
+- `remove` (type `section`): removes from `## Heading` to the next `## ` or end-of-prompt
+- `replace`: exact string substitution
+- If `promptPatchesFile` is not set, no patches are applied
 
 ### Multi-user architecture (Block-Level ACL)
 
