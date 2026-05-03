@@ -256,9 +256,9 @@ The plugin registers these tools for the agent:
 ### Capture pipeline
 
 1. Every user message is **archived** (raw transcript, always)
-2. The **classifier** (Gemini Flash via `llm-task`) analyzes the message:
+2. The **classifier** (Gemini Flash via direct REST call) analyzes the message:
    - Assigns 1-3 topics
-   - Detects fact type (fact/preference/rule/episode)
+   - Detects fact type (fact/bio/preference/rule/episode/internal)
    - Flags tasks (routed to skills, not stored)
    - Handles cross-user attribution ("Bob doesn't like pesto" → attributed to Bob)
 3. Memorable messages are saved as **captures** (pending promotion)
