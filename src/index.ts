@@ -31,6 +31,7 @@
  *   - /focus <topic>  — force session topic
  */
 
+import * as fs from "fs";
 import type Database from "better-sqlite3";
 import { resolveConfig, type PluginConfig } from "./config";
 import { topicsToJson } from "./utils";
@@ -50,6 +51,7 @@ import {
   syncUsersToDb,
   buildUsersContext,
   resolveUsersFilePath,
+  resolvePromptPatchesPath,
   MULTI_USER_DIRECTIVE,
 } from "./users-registry";
 import { applyPromptPatches } from "./prompt-patcher";
@@ -589,10 +591,10 @@ function register(api: any): void {
           prependContext: recallCtx.systemContext,
         };
 
-        // Apply prompt patches (declarative JSON) if configured
-        const patchesFile = config.promptPatchesFile;
+        // Apply prompt patches (declarative JSON) from workspace convention path
+        const patchesFile = resolvePromptPatchesPath(pluginApi);
         let basePrompt = event.prompt ?? "";
-        if (patchesFile && basePrompt) {
+        if (basePrompt && fs.existsSync(patchesFile)) {
           basePrompt = applyPromptPatches(basePrompt, patchesFile);
           dlog(`[Prompt] Patches applied from ${patchesFile}`);
         }
@@ -607,7 +609,7 @@ function register(api: any): void {
         }
 
         // Only override systemPrompt if we actually modified it
-        if (basePrompt && (patchesFile || registry.users.length > 0)) {
+        if (basePrompt && (fs.existsSync(patchesFile) || registry.users.length > 0)) {
           result.systemPrompt = basePrompt;
         }
 

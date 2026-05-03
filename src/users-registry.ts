@@ -497,9 +497,27 @@ export function getUserProfile(senderId: string): ParsedUser | null {
  * Tries api.config.workspaceDir first, falls back to OPENCLAW_HOME/workspace.
  */
 export function resolveUsersFilePath(api: any): string {
-  const workspaceDir =
+  const workspaceDir = resolveWorkspaceDir(api);
+  return path.join(workspaceDir, "USERS.md");
+}
+
+/**
+ * Resolve the path to prompt-patches.json.
+ * Convention: <workspace>/.openclaw/prompt-patches.json
+ * No external config needed — follows workspace structure.
+ */
+export function resolvePromptPatchesPath(api: any): string {
+  const workspaceDir = resolveWorkspaceDir(api);
+  return path.join(workspaceDir, ".openclaw", "prompt-patches.json");
+}
+
+/**
+ * Internal: resolve workspace directory from API or env.
+ */
+function resolveWorkspaceDir(api: any): string {
+  return (
     api?.config?.workspaceDir
     ?? api?.config?.workspace?.dir
-    ?? path.join(process.env.OPENCLAW_HOME || path.join(require("os").homedir(), ".openclaw"), "workspace");
-  return path.join(workspaceDir, "USERS.md");
+    ?? path.join(process.env.OPENCLAW_HOME || path.join(require("os").homedir(), ".openclaw"), "workspace")
+  );
 }
