@@ -321,7 +321,8 @@ function register(api: any): void {
     // Hook: before_prompt_build — context injection
     // -------------------------------------------------------------------
 
-    api.on("before_prompt_build", async (event: any) => {
+    api.on("before_prompt_build", async (...args: any[]) => {
+      const event = args[0];
       const database = getDb();
       if (!database || !config) {
         dlog(`before_prompt_build SKIPPED: db=${!!database}, config=${!!config}`);
@@ -348,6 +349,38 @@ function register(api: any): void {
       }
 
       try {
+        // ---- FULL DUMP: capture everything OpenClaw passes to this hook ----
+        dlog(`before_prompt_build: args.length=${args.length}`);
+        for (let a = 0; a < args.length; a++) {
+          const arg = args[a];
+          const type = typeof arg;
+          if (arg === null || arg === undefined) {
+            dlog(`  arg[${a}] = ${arg}`);
+          } else if (type === 'object') {
+            const enumKeys = Object.keys(arg).filter(k => k !== 'prompt' && k !== 'messages');
+            const ownKeys = Object.getOwnPropertyNames(arg).filter(k => k !== 'prompt' && k !== 'messages');
+            const proto = Object.getPrototypeOf(arg);
+            const protoKeys = proto && proto !== Object.prototype
+              ? Object.getOwnPropertyNames(proto).filter(k => k !== 'constructor')
+              : [];
+            dlog(`  arg[${a}] type=${type}, enumKeys=[${enumKeys.join(', ')}], ownKeys=[${ownKeys.join(', ')}], protoKeys=[${protoKeys.join(', ')}]`);
+            // Dump all non-prompt/messages values (truncated)
+            for (const k of [...new Set([...enumKeys, ...ownKeys, ...protoKeys])]) {
+              try {
+                const val = arg[k];
+                const valStr = typeof val === 'function' ? '[function]'
+                  : typeof val === 'object' && val !== null ? JSON.stringify(val).substring(0, 200)
+                  : String(val);
+                dlog(`    arg[${a}].${k} = (${typeof val}) ${valStr}`);
+              } catch (e) {
+                dlog(`    arg[${a}].${k} = [ERROR: ${e}]`);
+              }
+            }
+          } else {
+            dlog(`  arg[${a}] type=${type}, value=${String(arg).substring(0, 200)}`);
+          }
+        }
+
         dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
 
         // ---------------------------------------------------------------
