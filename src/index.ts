@@ -88,19 +88,9 @@ let pluginApi: any = null;  // Cached api reference for USERS.md path resolution
  */
 let lastResolvedSender: string = "unknown";
 
-/**
- * Sender ID bridge from message_received → before_prompt_build.
- *
- * message_received has rich event metadata (event.from, metadata.senderId)
- * but before_prompt_build only gets {prompt, messages} — no identity info.
- *
- * Race-safety: we store a timestamp alongside the ID and enforce:
- *   1. Expiry: only use if set within the last 10s (same turn)
- *   2. Consume-once: reset after reading to prevent stale leaks
- * This ensures that concurrent users or cron jobs never inherit
- * a stale sender from a different session.
- */
-let msgReceivedBridge: { id: string; ts: number } = { id: "", ts: 0 };
+// NOTE: msgReceivedBridge was removed in 2026-05-04 refactor.
+// The ctx object (2nd arg of hook callback) provides sessionKey directly.
+// See wiki: [[infrastructure/memory-wiki-engine#identity-bridge]]
 
 
 // Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
@@ -198,10 +188,8 @@ function register(api: any): void {
         const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || event.from || "unknown";
 
         // Extract numeric ID from senderId (e.g. "telegram:7776007798" → "7776007798")
-        // and store for before_prompt_build which has no event metadata
         const numericMatch = senderId.match(/(\d{5,})/);
         const numericId = numericMatch ? numericMatch[1] : senderId;
-        msgReceivedBridge = { id: numericId, ts: Date.now() };
         dlog(`Resolved sender: id=${senderId}, numericId=${numericId}, name=${senderName}, session=${sessionKey}`);
 
         const messageText = event.content || event.text || "";
@@ -321,8 +309,7 @@ function register(api: any): void {
     // Hook: before_prompt_build — context injection
     // -------------------------------------------------------------------
 
-    api.on("before_prompt_build", async (...args: any[]) => {
-      const event = args[0];
+    api.on("before_prompt_build", async (event: any, ctx: any) => {
       const database = getDb();
       if (!database || !config) {
         dlog(`before_prompt_build SKIPPED: db=${!!database}, config=${!!config}`);
@@ -349,38 +336,8 @@ function register(api: any): void {
       }
 
       try {
-        // ---- FULL DUMP: capture everything OpenClaw passes to this hook ----
-        dlog(`before_prompt_build: args.length=${args.length}`);
-        for (let a = 0; a < args.length; a++) {
-          const arg = args[a];
-          const type = typeof arg;
-          if (arg === null || arg === undefined) {
-            dlog(`  arg[${a}] = ${arg}`);
-          } else if (type === 'object') {
-            const enumKeys = Object.keys(arg).filter(k => k !== 'prompt' && k !== 'messages');
-            const ownKeys = Object.getOwnPropertyNames(arg).filter(k => k !== 'prompt' && k !== 'messages');
-            const proto = Object.getPrototypeOf(arg);
-            const protoKeys = proto && proto !== Object.prototype
-              ? Object.getOwnPropertyNames(proto).filter(k => k !== 'constructor')
-              : [];
-            dlog(`  arg[${a}] type=${type}, enumKeys=[${enumKeys.join(', ')}], ownKeys=[${ownKeys.join(', ')}], protoKeys=[${protoKeys.join(', ')}]`);
-            // Dump all non-prompt/messages values (truncated)
-            for (const k of [...new Set([...enumKeys, ...ownKeys, ...protoKeys])]) {
-              try {
-                const val = arg[k];
-                const valStr = typeof val === 'function' ? '[function]'
-                  : typeof val === 'object' && val !== null ? JSON.stringify(val).substring(0, 200)
-                  : String(val);
-                dlog(`    arg[${a}].${k} = (${typeof val}) ${valStr}`);
-              } catch (e) {
-                dlog(`    arg[${a}].${k} = [ERROR: ${e}]`);
-              }
-            }
-          } else {
-            dlog(`  arg[${a}] type=${type}, value=${String(arg).substring(0, 200)}`);
-          }
-        }
-
+        // Log ctx (2nd arg) — the SDK-provided hook context with session identity
+        dlog(`before_prompt_build: ctx=${ctx ? `{sessionKey=${ctx.sessionKey}, sessionId=${ctx.sessionId}, trigger=${ctx.trigger}, channelId=${ctx.channelId}, jobId=${ctx.jobId ?? 'N/A'}}` : 'undefined'}`);
         dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
 
         // ---------------------------------------------------------------
@@ -575,66 +532,33 @@ function register(api: any): void {
           return;
         }
 
-        // ---- Debug: dump event object for identity resolution ----
-        const eventKeys = Object.keys(event).filter(k => k !== 'prompt' && k !== 'messages').sort();
-        dlog(`before_prompt_build: event keys: [${eventKeys.join(', ')}]`);
-        dlog(`before_prompt_build: event.sessionKey=${event.sessionKey}, event.sessionId=${event.sessionId}`);
-        dlog(`before_prompt_build: event.metadata=${JSON.stringify(event.metadata ?? {}).substring(0, 300)}`);
-        if (event.session) dlog(`before_prompt_build: event.session=${JSON.stringify(event.session).substring(0, 300)}`);
-        // Check event.context (SDK docs say ctx.sessionKey, ctx.senderId, ctx.channelId, ctx.jobId exist)
-        const ctx = event.context;
-        if (ctx) {
-          dlog(`before_prompt_build: ctx keys: [${Object.keys(ctx).sort().join(', ')}]`);
-          dlog(`before_prompt_build: ctx.sessionKey=${ctx.sessionKey}, ctx.senderId=${ctx.senderId}, ctx.channelId=${ctx.channelId}, ctx.jobId=${ctx.jobId}, ctx.messageProvider=${ctx.messageProvider}`);
-        } else {
-          dlog(`before_prompt_build: event.context is ${ctx}`);
-        }
-
-        // Consume the message_received bridge (race-safe: expire after 10s, reset after read)
-        let bridgedSenderId = "";
-        if (msgReceivedBridge.id && (Date.now() - msgReceivedBridge.ts) < 10_000) {
-          bridgedSenderId = msgReceivedBridge.id;
-          dlog(`before_prompt_build: consumed bridge senderId="${bridgedSenderId}" (age=${Date.now() - msgReceivedBridge.ts}ms)`);
-        } else if (msgReceivedBridge.id) {
-          dlog(`before_prompt_build: bridge EXPIRED (age=${Date.now() - msgReceivedBridge.ts}ms, id=${msgReceivedBridge.id})`);
-        }
-        msgReceivedBridge = { id: "", ts: 0 }; // always reset — consume-once
-
-        // Resolve sender identity.
-        // Priority: extracted envelope > message_received bridge (fresh) > message metadata > event metadata > sessionKey > historical scan
-        let senderId = extractedSenderId
-          || bridgedSenderId
-          || messages[foundMsgIdx]?.metadata?.senderId
-          || messages[foundMsgIdx]?.from
-          || event.metadata?.senderId
-          || "";
-
-        // Build sessionId from all available sources (different OpenClaw versions use different property names)
-        const sessionId = event.sessionKey
-          || event.sessionId
-          || event.session?.key
-          || event.session?.id
-          || event.metadata?.sessionKey
-          || event.metadata?.sessionId
-          || event.metadata?.channelId
-          || (extractedSenderId ? `telegram:${extractedSenderId}` : "unknown");
-
-        dlog(`before_prompt_build: initial senderId="${senderId}", sessionId="${sessionId}"`);
-
-        // Try to extract numeric ID from session key
-        // Handles formats like: "agent:main:telegram:direct:7776007798"
-        //                       "telegram:7776007798"
-        if (!senderId && sessionId !== "unknown") {
-          const parts = sessionId.split(":");
+        // ---- Identity resolution using ctx (2nd hook argument) ----
+        // ctx.sessionKey format: "agent:main:telegram:direct:7776007798"
+        // Extract the numeric sender ID from the last colon-separated segment.
+        let ctxSenderId = "";
+        if (ctx?.sessionKey) {
+          const parts = ctx.sessionKey.split(":");
           const lastPart = parts[parts.length - 1];
           if (lastPart && /^\d+$/.test(lastPart)) {
-            senderId = lastPart;
-            dlog(`before_prompt_build: sender extracted from sessionKey: ${senderId}`);
+            ctxSenderId = lastPart;
           }
         }
 
+        // Resolve sender identity.
+        // Priority: envelope from current message > ctx.sessionKey > message metadata > historical scan
+        let senderId = extractedSenderId
+          || ctxSenderId
+          || messages[foundMsgIdx]?.metadata?.senderId
+          || messages[foundMsgIdx]?.from
+          || "";
+
+        // Session ID from ctx (always available) or fallback
+        const sessionId = ctx?.sessionKey || ctx?.sessionId || "unknown";
+
+        dlog(`before_prompt_build: senderId="${senderId}" (from=${extractedSenderId ? 'envelope' : ctxSenderId ? 'ctx.sessionKey' : 'metadata/fallback'}), sessionId="${sessionId}", trigger=${ctx?.trigger ?? 'unknown'}`);
+
         // Fallback: scan older messages for envelope sender_id
-        // (covers cron in shared sessions where previous messages have Telegram envelopes)
+        // (covers edge cases where ctx.sessionKey has no numeric suffix)
         if (!senderId) {
           for (let i = messages.length - 1; i >= 0; i--) {
             if (i === foundMsgIdx) continue;
