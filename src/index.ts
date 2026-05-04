@@ -445,11 +445,43 @@ function register(api: any): void {
           return { userText: afterFence, senderId };
         }
 
-        // ---- Main extraction loop ----
+        // ---- Main extraction ----
+        //
+        // CRITICAL (2026-05-04): event.prompt contains the envelope with
+        // the real user text appended after the metadata JSON blocks.
+        // Try to extract from event.prompt FIRST, then fall back to messages.
 
         let userQuery = "";
         let extractedSenderId = "";
         let foundMsgIdx = -1;
+
+        // 1. Try event.prompt (envelope with user text)
+        const eventPrompt = (event.prompt ?? "").trim();
+        if (eventPrompt && isEnvelopePart(eventPrompt)) {
+          // event.prompt has TWO envelope blocks (Conversation info + Sender info)
+          // The user text is after the LAST closing ```
+          const parsed = parseEnvelopeText(eventPrompt);
+          let candidateText = parsed.userText;
+
+          // The first parse might return "Sender (untrusted metadata):..." 
+          // because there are TWO JSON blocks. Parse again if so.
+          if (candidateText && isEnvelopePart(candidateText)) {
+            const parsed2 = parseEnvelopeText(candidateText);
+            candidateText = parsed2.userText;
+            if (parsed2.senderId && !extractedSenderId) extractedSenderId = parsed2.senderId;
+          }
+
+          if (candidateText && !isSystemContent(candidateText)) {
+            userQuery = candidateText;
+            if (parsed.senderId && !extractedSenderId) extractedSenderId = parsed.senderId;
+            foundMsgIdx = -2; // sentinel: found in event.prompt
+            ocLog.info(`[MWE:DIAG] userQuery from event.prompt: "${userQuery.substring(0, 60)}..." sender=${extractedSenderId}`);
+          } else {
+            ocLog.info(`[MWE:DIAG] event.prompt is envelope but no user text found after parsing`);
+          }
+        }
+
+        // 2. Fall back to messages array
 
         for (let i = messages.length - 1; i >= 0; i--) {
           const msg = messages[i];
@@ -655,38 +687,37 @@ function register(api: any): void {
         // ---------------------------------------------------------------
         // Build the return object.
         //
-        // CRITICAL (2026-05-04): event.prompt in before_prompt_build is
-        // the CONVERSATION ENVELOPE ("Conversation info (untrusted metadata)"),
-        // NOT the OpenClaw system prompt ("You are a personal assistant...").
-        // The real system prompt lives in the core and is injected separately.
+        // From OpenClaw source (attempt.prompt-helpers.ts lines 179-202):
+        //   - systemPrompt:         OVERWRITES the core system prompt — DO NOT USE
+        //   - prependContext:        prepended to messages (user-facing context)
+        //   - prependSystemContext:  prepended INSIDE the system prompt
+        //   - appendSystemContext:   appended INSIDE the system prompt
+        //   - appendContext:         appended to messages
         //
-        // We MUST NOT return result.systemPrompt here — doing so OVERWRITES
-        // the real system prompt with the envelope, stripping Sam of
-        // identity, skills, and persona.
-        //
-        // Instead, we put everything into prependContext:
-        //   1. Recall context (wiki + facts + captures)
-        //   2. <users_context> + multi-user directive
+        // event.prompt = user message envelope (NOT system prompt)
         // ---------------------------------------------------------------
 
-        // Build users context block
+        // Build users context block (goes INSIDE system prompt)
         const usersPath = resolveUsersFilePath(pluginApi);
         const registry = loadRegistry(usersPath);
         let usersBlock = "";
         if (registry.users.length > 0) {
           const usersCtx = buildUsersContext(registry, senderId);
-          usersBlock = "\n\n" + usersCtx + "\n\n" + MULTI_USER_DIRECTIVE;
+          usersBlock = usersCtx + "\n\n" + MULTI_USER_DIRECTIVE;
           ocLog.info(`[MWE:DIAG] <users_context> built for sender=${senderId}, length=${usersBlock.length}`);
         }
 
-        const fullContext = recallCtx.systemContext + usersBlock;
-
         const result: Record<string, string> = {
-          prependContext: fullContext,
+          prependContext: recallCtx.systemContext,
         };
 
-        ocLog.info(`[MWE:DIAG] prependContext length: ${fullContext.length} (recall=${recallCtx.systemContext?.length ?? 0} + users=${usersBlock.length})`);
-        ocLog.info(`[MWE:DIAG] ⚠️ result.systemPrompt NOT returned (event.prompt is envelope, not system prompt)`);
+        // <users_context> goes into the system prompt via prependSystemContext
+        if (usersBlock) {
+          result.prependSystemContext = usersBlock;
+        }
+
+        ocLog.info(`[MWE:DIAG] prependContext: ${recallCtx.systemContext?.length ?? 0} chars (recall facts/wiki)`);
+        ocLog.info(`[MWE:DIAG] prependSystemContext: ${usersBlock.length} chars (users_context → inside system prompt)`);
         ocLog.info(`[MWE:DIAG] ══════ before_prompt_build RETURN: keys=${Object.keys(result).join(',')} ══════`);
         return result;
       } catch (error) {
