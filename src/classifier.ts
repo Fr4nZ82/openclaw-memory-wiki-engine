@@ -18,7 +18,7 @@ const log = dbg("classifier");
  *   - Who the fact belongs to (owner attribution)
  *   - What type it is (fact, preference, rule, episode, bio, internal)
  *
- * Uses OpenClaw's `llm-task` with Gemini Flash — fast and cheap.
+ * Uses direct Gemini REST API (gemini-3-flash-preview) — fast and cheap.
  * Receives a sliding window of the last N messages for context.
  */
 

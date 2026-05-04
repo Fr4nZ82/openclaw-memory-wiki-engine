@@ -24,7 +24,7 @@ import * as path from "path";
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
 import type { SessionCapture, Fact } from "./db";
-import { generateFactId, topicsToJson, jsonToTopics } from "./utils";
+import { generateFactId, topicsToJson, jsonToTopics, hasDistinctiveKeywordDifference } from "./utils";
 import {
   generateEmbedding,
   serializeEmbedding,
@@ -146,7 +146,7 @@ export async function dreamRem(
 
   // Phase 2: de-duplication
   try {
-    report.factsDeduplicated = await deduplicateFacts(db, config, logger);
+    report.factsDeduplicated += await deduplicateFacts(db, config, logger);
   } catch (error) {
     report.errors.push(`De-duplication: ${error}`);
   }
@@ -304,8 +304,13 @@ async function promoteCapture(
 // ---------------------------------------------------------------------------
 
 /**
- * Finds and removes nearly identical facts (cosine > 0.85).
+ * Finds and removes nearly identical facts (cosine > 0.92).
  * Keeps the most recent, marks the others as superseded.
+ *
+ * Only compares facts with the same owner (owner_type + owner_id)
+ * to avoid cross-owner false positives. Additionally, applies a
+ * keyword guard: if the distinctive nouns between two facts differ,
+ * dedup is skipped even with high cosine similarity.
  */
 async function deduplicateFacts(
   db: Database.Database,
@@ -317,10 +322,10 @@ async function deduplicateFacts(
     return 0;
   }
 
-  // Load all active facts with embeddings
+  // Load all active facts with embeddings — include owner for grouping
   const facts = db
     .prepare(
-      `SELECT id, text, embedding, updated_at FROM facts
+      `SELECT id, text, embedding, updated_at, owner_type, owner_id FROM facts
        WHERE is_active = 1 AND embedding IS NOT NULL
        ORDER BY updated_at DESC`
     )
@@ -329,6 +334,8 @@ async function deduplicateFacts(
     text: string;
     embedding: Buffer;
     updated_at: string;
+    owner_type: string;
+    owner_id: string;
   }>;
 
   let deduplicated = 0;
@@ -342,11 +349,32 @@ async function deduplicateFacts(
     for (let j = i + 1; j < facts.length; j++) {
       if (processed.has(facts[j].id)) continue;
 
+      // Only compare facts with the same owner
+      if (
+        facts[i].owner_type !== facts[j].owner_type ||
+        facts[i].owner_id !== facts[j].owner_id
+      ) {
+        continue;
+      }
+
       try {
         const embB = deserializeEmbedding(facts[j].embedding);
         const similarity = cosineSimilarity(embA, embB);
 
-        if (similarity > 0.85) {
+        if (similarity > 0.92) {
+          // Keyword guard: if the distinctive words differ, skip
+          if (hasDistinctiveKeywordDifference(facts[i].text, facts[j].text)) {
+            if (config.debug) {
+              logger.debug(
+                `[Dream REM] Dedup blocked by keyword guard: ` +
+                  `"${facts[i].text.substring(0, 40)}..." vs ` +
+                  `"${facts[j].text.substring(0, 40)}..." ` +
+                  `(sim: ${similarity.toFixed(3)})`
+              );
+            }
+            continue;
+          }
+
           // The older one (j, since sorted DESC) gets superseded
           executeSupersedence(db, facts[j].id, facts[i].id);
           processed.add(facts[j].id);
@@ -365,23 +393,26 @@ async function deduplicateFacts(
   return deduplicated;
 }
 
+
 // ---------------------------------------------------------------------------
 // Confidence decay
 // ---------------------------------------------------------------------------
 
 /**
  * Lowers the confidence of facts not accessed for >90 days.
- * -0.1 per cycle. Never drops below 0.1 (never auto-delete).
+ * -0.05 per cycle (slow decay — takes 18 nightly cycles to reach minimum).
+ * Never drops below 0.1 (never auto-delete).
+ *
+ * Uses `last_accessed_at` (or `created_at` for facts never recalled)
+ * to determine inactivity. A single recall resets the 90-day window.
  */
 function decayConfidence(db: Database.Database, logger: any): number {
   const result = db
     .prepare(
       `UPDATE facts SET
-         confidence = MAX(0.1, confidence - 0.1),
-         updated_at = datetime('now')
+         confidence = MAX(0.1, confidence - 0.05)
        WHERE is_active = 1
-         AND access_count = 0
-         AND created_at < datetime('now', '-90 days')
+         AND COALESCE(last_accessed_at, created_at) < datetime('now', '-90 days')
          AND confidence > 0.1`
     )
     .run();

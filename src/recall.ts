@@ -546,7 +546,7 @@ async function hybridSearch(
 
       // Increment access counter
       db.prepare(
-        "UPDATE facts SET access_count = access_count + 1 WHERE id = ?"
+        "UPDATE facts SET access_count = access_count + 1, last_accessed_at = datetime('now') WHERE id = ?"
       ).run(factId);
     }
   }

@@ -641,6 +641,17 @@ function register(api: any): void {
       },
 
       async assemble({ messages }: { messages: any[] }) {
+        // Guard: after /new or session reset, messages may be empty.
+        // Gemini rejects empty contents with 400 — inject a synthetic marker
+        // so the model can respond with a greeting instead of crashing.
+        if (!Array.isArray(messages) || messages.length === 0) {
+          dlog(`assemble(): empty messages — injecting session restart marker`);
+          return {
+            messages: [{ role: "user", content: [{ type: "text", text: "[New session started]" }] }],
+            estimatedTokens: 0,
+          };
+        }
+
         const keepTurns = config!.keepTurns;
         const keepMessages = keepTurns * 2;
         let finalMessages = messages;

@@ -40,6 +40,7 @@ export interface Fact {
   embedding: Buffer | null;
   confidence: number;
   access_count: number;
+  last_accessed_at: string | null;
   created_at: string;
   updated_at: string;
   superseded_by: string | null;
@@ -92,7 +93,7 @@ export interface GroupMember {
 // SQL schema — current version
 // ---------------------------------------------------------------------------
 
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 /**
  * Table creation SQL for schema v1.
@@ -122,6 +123,7 @@ const SCHEMA_V1: string[] = [
     embedding      BLOB,
     confidence     REAL NOT NULL DEFAULT 1.0,
     access_count   INTEGER NOT NULL DEFAULT 0,
+    last_accessed_at TEXT,
     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
     superseded_by  TEXT,
@@ -343,8 +345,17 @@ function applySchema(db: Database.Database): void {
       db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(1);
     }
 
-    // v2, v3, etc. — future migrations go here
-    // if (currentVersion < 2) { ... }
+    // v2: add last_accessed_at column for time-based confidence decay
+    if (currentVersion < 2) {
+      // Add column if not exists (safe for fresh installs where v1 schema already has it)
+      const cols = db.prepare("PRAGMA table_info(facts)").all() as Array<{ name: string }>;
+      if (!cols.some(c => c.name === "last_accessed_at")) {
+        db.exec("ALTER TABLE facts ADD COLUMN last_accessed_at TEXT");
+      }
+      db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(2);
+    }
+
+    // v3, v4, etc. — future migrations go here
   });
 
   migrate();

@@ -16,7 +16,7 @@
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
 import type { Fact, SessionCapture } from "./db";
-import { jsonToTopics } from "./utils";
+import { jsonToTopics, hasDistinctiveKeywordDifference } from "./utils";
 import {
   generateEmbedding,
   cosineSimilarity,
@@ -54,7 +54,7 @@ export interface SupersedeCheck {
  * A fact supersedes if:
  *   - Same owner (owner_type + owner_id)
  *   - Same topic (at least 1 topic in common)
- *   - High semantic similarity (cosine > 0.85) OR
+ *   - High semantic similarity (cosine > 0.92) + keyword guard, OR
  *     same entity mentioned in the text
  *
  * @returns The superseded fact (if found), otherwise null
@@ -154,7 +154,11 @@ async function checkWithEmbedding(
       const candidateEmbedding = deserializeEmbedding(candidate.embedding);
       const score = cosineSimilarity(newEmbedding, candidateEmbedding);
 
-      if (score > 0.85 && (!bestMatch || score > bestMatch.score)) {
+      if (score > 0.92 && (!bestMatch || score > bestMatch.score)) {
+        // Keyword guard: skip if the distinctive nouns differ
+        if (hasDistinctiveKeywordDifference(newFactText, candidate.text)) {
+          continue;
+        }
         bestMatch = { fact: candidate, score };
       }
     } catch {
@@ -173,7 +177,7 @@ async function checkWithEmbedding(
   return {
     shouldSupersede: false,
     supersededFactId: null,
-    reason: `${candidates.length} candidates found but none above 0.85 threshold`,
+    reason: `${candidates.length} candidates found but none above 0.92 threshold`,
   };
 }
 
