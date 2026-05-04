@@ -711,13 +711,13 @@ function register(api: any): void {
           prependContext: recallCtx.systemContext,
         };
 
-        // <users_context> goes into the system prompt via prependSystemContext
+        // <users_context> goes AFTER the core system prompt (identity first, then user context)
         if (usersBlock) {
-          result.prependSystemContext = usersBlock;
+          result.appendSystemContext = usersBlock;
         }
 
         ocLog.info(`[MWE:DIAG] prependContext: ${recallCtx.systemContext?.length ?? 0} chars (recall facts/wiki)`);
-        ocLog.info(`[MWE:DIAG] prependSystemContext: ${usersBlock.length} chars (users_context → inside system prompt)`);
+        ocLog.info(`[MWE:DIAG] appendSystemContext: ${usersBlock.length} chars (users_context → after system prompt)`);
         ocLog.info(`[MWE:DIAG] ══════ before_prompt_build RETURN: keys=${Object.keys(result).join(',')} ══════`);
         return result;
       } catch (error) {
