@@ -210,6 +210,9 @@ DO NOT use bullet point lists if possible. Write a cohesive, narrative prose des
 Insert Obsidian-compatible [[wikilinks]] for known concepts and entities naturally in the text.
 If old facts are contradicted by new ones, update the narrative.
 
+CRITICAL CHRONOLOGY INSTRUCTION:
+Use specific dated episodes or future events ONLY as evidence to deduce skills, habits, roles, or relationships (e.g., "Tizen developer"). Summarize events in the past tense to provide historical context, but DO NOT turn the wiki into an appointment calendar. Do not include future dates or exact operational appointments in the final narrative.
+
 CRITICAL ACL INSTRUCTION:
 Some facts have [ACL: type="..." owner="..." sender="..."] tags.
 You MUST wrap the corresponding information in the generated text with HTML tags like this:
