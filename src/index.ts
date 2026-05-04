@@ -88,6 +88,15 @@ let pluginApi: any = null;  // Cached api reference for USERS.md path resolution
  */
 let lastResolvedSender: string = "unknown";
 
+/**
+ * Sender ID resolved from the most recent message_received event.
+ * The message_received hook fires BEFORE before_prompt_build and has access
+ * to rich event metadata (event.from, event.metadata.senderId) that
+ * before_prompt_build does NOT receive (it only gets prompt + messages).
+ * We bridge the identity by storing it here.
+ */
+let lastMessageReceivedSenderId: string = "";
+
 
 // Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
 let dbModule: typeof import("./db") | null = null;
@@ -183,7 +192,11 @@ function register(api: any): void {
         // Session key: prefer channelId, fall back to "from" field (e.g. "telegram:7776007798")
         const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || event.from || "unknown";
 
-        dlog(`Resolved sender: id=${senderId}, name=${senderName}, session=${sessionKey}`);
+        // Extract numeric ID from senderId (e.g. "telegram:7776007798" → "7776007798")
+        // and store for before_prompt_build which has no event metadata
+        const numericMatch = senderId.match(/(\d{5,})/);
+        lastMessageReceivedSenderId = numericMatch ? numericMatch[1] : senderId;
+        dlog(`Resolved sender: id=${senderId}, numericId=${lastMessageReceivedSenderId}, name=${senderName}, session=${sessionKey}`);
 
         const messageText = event.content || event.text || "";
 
@@ -531,8 +544,9 @@ function register(api: any): void {
         if (event.session) dlog(`before_prompt_build: event.session=${JSON.stringify(event.session).substring(0, 300)}`);
 
         // Resolve sender identity.
-        // Priority: extracted envelope > message metadata > event metadata > sessionKey parse > historical scan
+        // Priority: extracted envelope > message_received bridge > message metadata > event metadata > sessionKey parse > historical scan
         let senderId = extractedSenderId
+          || lastMessageReceivedSenderId  // ← bridge from message_received hook (has rich event.from)
           || messages[foundMsgIdx]?.metadata?.senderId
           || messages[foundMsgIdx]?.from
           || event.metadata?.senderId
