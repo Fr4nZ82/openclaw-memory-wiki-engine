@@ -386,7 +386,7 @@ export function buildUsersContext(registry: UsersRegistry, senderId: string): st
   // Build roster
   const rosterLines: string[] = [];
   for (const u of registry.users) {
-    const attrs: string[] = [`slug="${u.slug}"`];
+    const attrs: string[] = [`slug="${u.slug}"`, `sender_id="${u.sender_id}"`];
     if (u.aliases.length > 0) attrs.push(`aliases="${u.aliases.join(", ")}"`);
     if (u.groups.length > 0) attrs.push(`groups="${u.groups.join(", ")}"`);
     if (u.relazioni) attrs.push(`relazioni="${u.relazioni}"`);
