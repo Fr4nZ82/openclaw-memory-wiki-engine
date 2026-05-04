@@ -134,7 +134,7 @@ function buildClassifierPrompt(
     })
     .join("\n");
 
-  return `You are a message classifier for a family AI assistant.
+  return `You are a message classifier for a multi-user AI assistant.
 Your task is to analyze ONE message and decide if it contains information worth remembering.
 
 ## Conversation context (recent messages)
@@ -197,7 +197,7 @@ Analyze the message and respond with valid JSON:
 
 6. **fact_type**:
    - fact: general objective information.
-   - bio: biographical data, family relationships, personal history.
+   - bio: biographical data, interpersonal relationships, personal history.
    - preference: tastes, likes, dislikes.
    - rule: behavioral rules, prohibitions, system instructions.
    - episode: temporary events, emotional states, specific occurrences (ONLY PAST OR PRESENT).

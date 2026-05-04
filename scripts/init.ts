@@ -251,7 +251,7 @@ function buildExtractionPrompt(
     parts.push(`## FILE: memory/${note.filename}\n\n${truncated}`);
   }
 
-  return `You are a fact extractor for a family AI assistant's memory system.
+  return `You are a fact extractor for a multi-user AI assistant's memory system.
 
 ## Known users (enrolled in the system)
 
@@ -275,7 +275,7 @@ Focus on:
 - Biographical data (birth dates, relationships, professions)
 - Preferences and tastes
 - Rules that affect the assistant's behavior
-- Family relationships
+- Interpersonal relationships
 - Permissions and restrictions per user
 - Medical/health information
 - Current episodes or temporary states
@@ -312,7 +312,7 @@ Return a JSON array of facts:
 
 Rules for owner_id:
 - Use the CANONICAL NAME (first name, lowercase) from the known users list
-- For family-wide facts → owner_type: "group", owner_id: "famiglia"
+- For group-wide facts → owner_type: "group", owner_id: "<the matching group_id>"
 - For system-wide rules → owner_type: "global", owner_id: "global"
 - owner_id must be lowercase
 
