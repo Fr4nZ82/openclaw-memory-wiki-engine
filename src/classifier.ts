@@ -207,7 +207,6 @@ Analyze the message and respond with valid JSON:
 If fact_type is "internal", is_internal MUST be true.
 
 7. **owner_type and owner_id**: who OWNS the fact (not who says it).
-   owner_id must be the CANONICAL NAME (first name, lowercase) from the known users list.
    - If the fact aligns with the explicitly declared "Scope" of one of the User's groups:
      → owner_type: "group", owner_id: "<the matching group_id>"
    - If the fact is personal to the sender and does not match any group scope:
