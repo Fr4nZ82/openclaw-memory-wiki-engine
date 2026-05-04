@@ -211,8 +211,8 @@ If fact_type is "internal", is_internal MUST be true.
      → owner_type: "group", owner_id: "<the matching group_id>"
    - If the fact is personal to the sender and does not match any group scope:
      → owner_type: "user", owner_id: "${currentUser?.canonical_name.toLowerCase() || currentMessage.sender_id}"
-   - If ${senderLabel} states a fact about another enrolled user:
-     → look up that user in the known users list → owner_type: "user", owner_id: "<their canonical name>"
+   - If ${senderLabel} states a fact about another enrolled user (even if they use an alias):
+     → owner_type: "user", owner_id: "<their CANONICAL NAME from the known users list (lowercase)>"
 
 ### Output
 
