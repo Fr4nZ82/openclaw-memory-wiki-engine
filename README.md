@@ -221,6 +221,11 @@ All settings are optional — defaults work out of the box. Configure via `openc
 | `maxMessageLength` | `2000` | Max chars sent to classifier |
 | `promptPatchesFile` | *(none)* | Path to a JSON file with declarative system prompt patches (see [Prompt Patcher](#prompt-patcher)) |
 
+> **Tip:** You can adjust the conversation history depth and classifier window directly from the OpenClaw CLI without editing the JSON file manually:
+> ```bash
+> openclaw config set plugins.entries.openclaw-memory-wiki-engine.config.keepTurns 8
+> ```
+
 ### Ollama setup (optional, recommended)
 
 For vector search, install [Ollama](https://ollama.ai/) and pull the embedding model:
