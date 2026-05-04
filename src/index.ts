@@ -56,6 +56,7 @@ import {
 } from "./users-registry";
 import { applyPromptPatches } from "./prompt-patcher";
 import {
+  wikiInit,
   wikiIngest,
   wikiLint,
   wikiSync,
@@ -1001,6 +1002,21 @@ function register(api: any): void {
             .filter(Boolean)
             .join("\n"),
         };
+      },
+    });
+
+    // /wiki-init — bootstrap legacy workspace files
+    api.registerCommand({
+      name: "wiki-init",
+      description: "Bootstraps initial knowledge from workspace files (MEMORY.md, USER.md, memory/)",
+      acceptsArgs: false,
+      requireAuth: false,
+      handler: async () => {
+        const database = getDb();
+        if (!database || !config) return { text: "Plugin not initialized" };
+
+        const result = await wikiInit(api, database, config, ocLog);
+        return { text: result.message };
       },
     });
   }

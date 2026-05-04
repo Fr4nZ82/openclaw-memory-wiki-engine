@@ -173,13 +173,13 @@ Friendly and patient. Prefers step-by-step explanations.
 
 **3. Bootstrapping initial knowledge (Optional):**
 
-If you have legacy notes (`USER.md`, `MEMORY.md`, or a `memory/` folder) in your workspace, you can extract them into structured facts using the AI bootstrap script before starting the system for the first time. 
-*Note: This script uses Gemini Flash and requires the `GEMINI_API_KEY` to be set in your environment or in `~/.openclaw/.env`.*
+If you have legacy notes (`USER.md`, `MEMORY.md`, or a `memory/` folder) in your workspace, you can extract them into structured facts using the AI bootstrap command before starting the system for the first time. 
+*Note: This command uses the gateway's LLM engine.*
 
-```bash
-# Run the init script (it will parse markdown and insert facts into the DB)
-npx tsx scripts/init.ts --workspace ~/.openclaw/workspace
-```
+Run the following command directly in the OpenClaw CLI or chat interface:
+`/wiki-init`
+
+This will parse the markdown, insert facts into the DB, generate embeddings, and move legacy files to `.memory-backup/`.
 
 ## Configuration
 
@@ -247,6 +247,7 @@ The plugin registers these tools for the agent:
 
 | Command | Description |
 |---------|-------------|
+| `/wiki-init` | Bootstrap legacy workspace files (MEMORY.md, USER.md, memory/) into facts |
 | `/dream` | Trigger a manual dream cycle (`/dream rem` for deep) |
 | `/memory-status` | Show memory statistics |
 | `/focus <topic>` | Force a topic for the current session |

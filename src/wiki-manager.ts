@@ -248,6 +248,143 @@ Respond ONLY with a valid JSON array containing exactly one object:
 }
 
 // ---------------------------------------------------------------------------
+// /wiki-init
+// ---------------------------------------------------------------------------
+
+/**
+ * Bootstraps initial knowledge from workspace files (MEMORY.md, USER.md, memory/).
+ * Replaces the legacy scripts/init.ts utility.
+ */
+export async function wikiInit(
+  api: any,
+  db: Database.Database,
+  config: PluginConfig,
+  logger: any
+): Promise<{ success: boolean; message: string }> {
+  // Check enrollment
+  const users = db.prepare("SELECT sender_id, names FROM users").all() as Array<{sender_id: string, names: string}>;
+  if (users.length === 0) {
+    return { success: false, message: "❌ No users enrolled. Define users in USERS.md first." };
+  }
+  const knownUsers = users.map((u) => {
+    const names = JSON.parse(u.names) as string[];
+    return { sender_id: u.sender_id, canonical: names[0] || u.sender_id, names };
+  });
+
+  const groups = db.prepare("SELECT group_id, group_name, scope FROM groups").all() as Array<{ group_id: string; group_name: string; scope: string }>;
+
+  // Resolve workspace
+  const workspacePath = (api?.config?.workspaceDir ?? api?.config?.workspace?.dir ?? path.join(process.env.OPENCLAW_HOME || path.join(require("os").homedir(), ".openclaw"), "workspace"));
+
+  // Read files
+  const userMdPath = path.join(workspacePath, "USER.md");
+  const memoryMdPath = path.join(workspacePath, "MEMORY.md");
+  const memoryDirPath = path.join(workspacePath, "memory");
+
+  const parts: string[] = [];
+  if (fs.existsSync(userMdPath)) parts.push(`## FILE: USER.md\n\n${fs.readFileSync(userMdPath, "utf-8")}`);
+  if (fs.existsSync(memoryMdPath)) parts.push(`## FILE: MEMORY.md\n\n${fs.readFileSync(memoryMdPath, "utf-8")}`);
+  
+  if (fs.existsSync(memoryDirPath) && fs.statSync(memoryDirPath).isDirectory()) {
+    const files = fs.readdirSync(memoryDirPath).filter(f => f.endsWith(".md")).sort();
+    for (const f of files) {
+      const c = fs.readFileSync(path.join(memoryDirPath, f), "utf-8");
+      if (c.length > 200) {
+        const truncated = c.length > 5000 ? c.substring(0, 5000) + "\n...(truncated)" : c;
+        parts.push(`## FILE: memory/${f}\n\n${truncated}`);
+      }
+    }
+  }
+
+  if (parts.length === 0) {
+    return { success: true, message: "ℹ️ No workspace files to process." };
+  }
+
+  const usersList = knownUsers.map((u) => `- ${u.canonical} (aliases: ${u.names.join(", ")}, sender_id: ${u.sender_id})`).join("\n");
+  const groupsList = groups.length > 0 ? groups.map(g => `- ${g.group_id} (${g.group_name})`).join("\n") : "- no groups";
+
+  const prompt = `You are a fact extractor for a multi-user AI assistant's memory system.
+## Known users
+${usersList}
+## Known groups
+${groupsList}
+## Workspace files
+${parts.join("\n\n---\n\n")}
+## Instructions
+Extract ALL structured facts from these files. Focus on: Biographical data, Preferences, Rules, Relationships, Medical, Episodes, Plans.
+Do NOT extract: System configuration, Technical details, The assistant's personality.
+
+Respond ONLY with a JSON array:
+[
+  { "fact_text": "...", "fact_type": "fact", "owner_type": "user", "owner_id": "frodo", "topics": ["..."], "confidence": 1.0 }
+]
+Rules for owner_id: Use CANONICAL NAME for users, group_id for groups, "global" for system rules.`;
+
+  logger.info("[Wiki Init] Calling LLM for bootstrap extraction...");
+  let response: string;
+  try {
+    if (api.llmTask) {
+      response = await api.llmTask({ prompt, model: "flash", responseFormat: "json" });
+    } else {
+      response = await api.callTool("llm-task", { prompt, model: "flash" });
+    }
+  } catch (err) {
+    return { success: false, message: `❌ LLM extraction failed: ${err}` };
+  }
+
+  const extracted = typeof response === "string" ? response : JSON.stringify(response);
+  let facts: any[];
+  try {
+    const start = extracted.indexOf("[");
+    const end = extracted.lastIndexOf("]");
+    facts = JSON.parse(extracted.substring(start, end + 1));
+  } catch {
+    return { success: false, message: "❌ LLM returned malformed JSON" };
+  }
+
+  const { generateFactId, topicsToJson } = await import("./utils");
+  const { generateEmbedding } = await import("./embedding");
+
+  let factsInserted = 0;
+  for (const f of facts) {
+    if (!f.fact_text) continue;
+    const factId = generateFactId();
+    let embeddingBuffer: Buffer | null = null;
+    try {
+      const emb = await generateEmbedding(f.fact_text, config);
+      embeddingBuffer = Buffer.from(new Float32Array(emb).buffer);
+    } catch { /* ignore */ }
+
+    db.prepare(
+      `INSERT INTO facts (id, owner_type, owner_id, text, fact_type, topics, embedding, confidence, source, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'bootstrap', 1, datetime('now'), datetime('now'))`
+    ).run(
+      factId, f.owner_type || "global", f.owner_id || "system", f.fact_text, f.fact_type || "fact",
+      topicsToJson(f.topics || []), embeddingBuffer, f.confidence || 0.9
+    );
+    factsInserted++;
+  }
+
+  // Backup
+  const backupDir = path.join(workspacePath, ".memory-backup");
+  fs.mkdirSync(backupDir, { recursive: true });
+  if (fs.existsSync(memoryMdPath)) {
+    fs.copyFileSync(memoryMdPath, path.join(backupDir, "MEMORY.md"));
+    fs.unlinkSync(memoryMdPath);
+  }
+  if (fs.existsSync(memoryDirPath)) {
+    const backupMemDir = path.join(backupDir, "memory");
+    fs.mkdirSync(backupMemDir, { recursive: true });
+    for (const file of fs.readdirSync(memoryDirPath)) {
+      fs.copyFileSync(path.join(memoryDirPath, file), path.join(backupMemDir, file));
+    }
+    fs.rmSync(memoryDirPath, { recursive: true });
+  }
+
+  return { success: true, message: `✅ Bootstrap complete! Inserted ${factsInserted} facts and backed up legacy files.` };
+}
+
+// ---------------------------------------------------------------------------
 // /wiki-lint
 // ---------------------------------------------------------------------------
 
