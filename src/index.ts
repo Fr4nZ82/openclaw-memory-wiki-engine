@@ -653,49 +653,40 @@ function register(api: any): void {
         dlog(`[Recall] ${recallCtx.estimatedTokens} tokens injected — wiki: ${recallCtx.details.wikiPagesMatched}, facts: ${recallCtx.details.factsMatched}, captures: ${recallCtx.details.capturesFound}, vector: ${recallCtx.details.vectorSearchUsed}`);
 
         // ---------------------------------------------------------------
-        // Build the return object:
-        //   prependContext: recall context (wiki + facts + captures)
-        //   systemPrompt:   patched prompt + <users_context> + multi-user directive
+        // Build the return object.
+        //
+        // CRITICAL (2026-05-04): event.prompt in before_prompt_build is
+        // the CONVERSATION ENVELOPE ("Conversation info (untrusted metadata)"),
+        // NOT the OpenClaw system prompt ("You are a personal assistant...").
+        // The real system prompt lives in the core and is injected separately.
+        //
+        // We MUST NOT return result.systemPrompt here — doing so OVERWRITES
+        // the real system prompt with the envelope, stripping Sam of
+        // identity, skills, and persona.
+        //
+        // Instead, we put everything into prependContext:
+        //   1. Recall context (wiki + facts + captures)
+        //   2. <users_context> + multi-user directive
         // ---------------------------------------------------------------
-        const result: Record<string, string> = {
-          prependContext: recallCtx.systemContext,
-        };
-        ocLog.info(`[MWE:DIAG] prependContext length: ${recallCtx.systemContext?.length ?? 0}`);
 
-        // Apply prompt patches (declarative JSON) from workspace convention path
-        const patchesFile = resolvePromptPatchesPath(pluginApi);
-        let basePrompt = event.prompt ?? "";
-        ocLog.info(`[MWE:DIAG] basePrompt from event.prompt: length=${basePrompt.length}, empty=${!basePrompt}`);
-        ocLog.info(`[MWE:DIAG] patchesFile: ${patchesFile}, exists=${fs.existsSync(patchesFile)}`);
-
-        if (basePrompt && fs.existsSync(patchesFile)) {
-          basePrompt = applyPromptPatches(basePrompt, patchesFile);
-          ocLog.info(`[MWE:DIAG] Patches applied, basePrompt now: length=${basePrompt.length}`);
-        } else {
-          ocLog.info(`[MWE:DIAG] Patches SKIPPED: basePrompt empty=${!basePrompt}, patchesFile exists=${fs.existsSync(patchesFile)}`);
-        }
-
-        // Inject <users_context> and Multi-User directive
+        // Build users context block
         const usersPath = resolveUsersFilePath(pluginApi);
         const registry = loadRegistry(usersPath);
-        ocLog.info(`[MWE:DIAG] registry: ${registry.users.length} users, basePrompt truthy=${!!basePrompt}`);
-
-        if (registry.users.length > 0 && basePrompt) {
+        let usersBlock = "";
+        if (registry.users.length > 0) {
           const usersCtx = buildUsersContext(registry, senderId);
-          basePrompt = basePrompt + "\n\n" + usersCtx + "\n\n" + MULTI_USER_DIRECTIVE;
-          ocLog.info(`[MWE:DIAG] <users_context> injected, basePrompt now: length=${basePrompt.length}`);
-        } else {
-          ocLog.info(`[MWE:DIAG] ⚠️ <users_context> SKIPPED: users=${registry.users.length}, basePrompt truthy=${!!basePrompt}`);
+          usersBlock = "\n\n" + usersCtx + "\n\n" + MULTI_USER_DIRECTIVE;
+          ocLog.info(`[MWE:DIAG] <users_context> built for sender=${senderId}, length=${usersBlock.length}`);
         }
 
-        // Only override systemPrompt if we actually modified it
-        if (basePrompt && (fs.existsSync(patchesFile) || registry.users.length > 0)) {
-          result.systemPrompt = basePrompt;
-          ocLog.info(`[MWE:DIAG] ✅ result.systemPrompt SET: length=${basePrompt.length}, first120="${basePrompt.substring(0, 120).replace(/\n/g, '\\n')}"`);
-        } else {
-          ocLog.info(`[MWE:DIAG] ❌ result.systemPrompt NOT SET: basePrompt empty=${!basePrompt}`);
-        }
+        const fullContext = recallCtx.systemContext + usersBlock;
 
+        const result: Record<string, string> = {
+          prependContext: fullContext,
+        };
+
+        ocLog.info(`[MWE:DIAG] prependContext length: ${fullContext.length} (recall=${recallCtx.systemContext?.length ?? 0} + users=${usersBlock.length})`);
+        ocLog.info(`[MWE:DIAG] ⚠️ result.systemPrompt NOT returned (event.prompt is envelope, not system prompt)`);
         ocLog.info(`[MWE:DIAG] ══════ before_prompt_build RETURN: keys=${Object.keys(result).join(',')} ══════`);
         return result;
       } catch (error) {
