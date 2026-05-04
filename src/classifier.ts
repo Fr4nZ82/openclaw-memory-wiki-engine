@@ -207,12 +207,12 @@ Analyze the message and respond with valid JSON:
 If fact_type is "internal", is_internal MUST be true.
 
 7. **owner_type and owner_id**: who OWNS the fact (not who says it).
-   - If the fact aligns with the explicitly declared "Scope" of one of the User's groups:
-     → owner_type: "group", owner_id: "<the matching group_id>"
-   - If the fact is personal to the sender and does not match any group scope:
-     → owner_type: "user", owner_id: "${currentUser?.canonical_name.toLowerCase() || currentMessage.sender_id}"
-   - If ${senderLabel} states a fact about another enrolled user (even if they use an alias):
-     → owner_type: "user", owner_id: "<their CANONICAL NAME from the known users list (lowercase)>"
+   First, check if the fact aligns with the explicitly declared "Scope" of any of the User's groups:
+   - If YES → owner_type: "group", owner_id: "<the matching group_id>"
+   - If NO (the fact is strictly personal, regardless of who it is about):
+     → owner_type: "user"
+     → owner_id: "<the CANONICAL NAME (lowercase) of the person the fact is about>"
+     (If it's about the sender, use "${currentUser?.canonical_name.toLowerCase() || currentMessage.sender_id}". If it's about another enrolled user, use their canonical name from the list.)
 
 ### Output
 
