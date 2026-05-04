@@ -69,6 +69,7 @@ export interface CaptureStats {
 interface PreparedStatements {
   insertArchive: Database.Statement;
   insertCapture: Database.Statement;
+  insertToolLog: Database.Statement;
 }
 
 let stmts: PreparedStatements | null = null;
@@ -93,6 +94,12 @@ function getStatements(db: Database.Database): PreparedStatements {
         VALUES
           (@session_id, @message_text, @fact_text, @topics, @sender_id,
            @owner_type, @owner_id, @fact_type, @is_internal, @captured_at)
+      `),
+      insertToolLog: db.prepare(`
+        INSERT INTO tool_log
+          (session_id, sender_id, action_text, timestamp)
+        VALUES
+          (@session_id, @sender_id, @action_text, @timestamp)
       `),
     };
   }
@@ -158,10 +165,16 @@ export async function processUserMessage(
   // Step 3 — Evaluate whether to capture
 
   // 3a. Tasks and appointments → skills handle these, we skip
-  if (classification.is_task && !classification.is_memorable) {
-    stats.skipped_reason = "is_task (handled by skills)";
-    log(`skipped: is_task`);
-    return stats;
+  // But we still log them to the tool_log
+  if (classification.is_task) {
+    log(`SAVING TOOL LOG: action="${message.text.substring(0, 50)}", sender=${message.sender_id}`);
+    saveToolLog(db, message);
+    
+    if (!classification.is_memorable) {
+      stats.skipped_reason = "is_task (handled by skills)";
+      log(`skipped: is_task`);
+      return stats;
+    }
   }
 
   // 3b. Not memorable → skip
@@ -247,6 +260,23 @@ function saveCapture(
     fact_type: classification.fact_type,
     is_internal: classification.is_internal ? 1 : 0,
     captured_at: message.timestamp,
+  });
+}
+
+/**
+ * Saves a task/action to the tool_log.
+ */
+function saveToolLog(
+  db: Database.Database,
+  message: IncomingMessage
+): void {
+  const { insertToolLog } = getStatements(db);
+
+  insertToolLog.run({
+    session_id: message.session_id,
+    sender_id: message.sender_id,
+    action_text: message.text,
+    timestamp: message.timestamp,
   });
 }
 

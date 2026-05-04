@@ -93,7 +93,7 @@ export interface GroupMember {
 // SQL schema — current version
 // ---------------------------------------------------------------------------
 
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 /**
  * Table creation SQL for schema v1.
@@ -264,6 +264,19 @@ const SCHEMA_V1: string[] = [
   )`,
 ];
 
+const SCHEMA_V3: string[] = [
+  // -----------------------------------------------------------------------
+  // Layer 6 — Tool Log
+  // -----------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS tool_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL,
+    sender_id     TEXT NOT NULL,
+    action_text   TEXT NOT NULL,
+    timestamp     TEXT NOT NULL DEFAULT (datetime('now'))
+  )`
+];
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -355,7 +368,15 @@ function applySchema(db: Database.Database): void {
       db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(2);
     }
 
-    // v3, v4, etc. — future migrations go here
+    // v3: add tool_log table
+    if (currentVersion < 3) {
+      for (const sql of SCHEMA_V3) {
+        db.exec(sql);
+      }
+      db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(3);
+    }
+
+    // v4, etc. — future migrations go here
   });
 
   migrate();

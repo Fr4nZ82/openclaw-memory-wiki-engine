@@ -456,7 +456,8 @@ You serve multiple users with different permission levels.
 - If a user requests something beyond their permissions, decline and offer to notify an admin.
 - Unknown senders: chat-only, no system actions.
 - Forward critical or blocked requests to admin users via sam_send.sh.
-- Never reveal other users' private profiles or restrictions.`;
+- Never reveal other users' private profiles or restrictions.
+- Action requests (tasks, appointments, prints) are automatically logged by the Memory Wiki Engine in the 'tool_log' table, so you do NOT need to log them manually.`;
 
 // ---------------------------------------------------------------------------
 // ACL helpers
