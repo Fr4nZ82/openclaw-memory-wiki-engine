@@ -336,6 +336,32 @@ function register(api: any): void {
       }
 
       try {
+        // ─── DIAGNOSTIC: system prompt investigation (2026-05-04) ───
+        // Log the raw state of event.prompt BEFORE any processing.
+        // This tells us whether OpenClaw provides the base system prompt here.
+        const rawPrompt = event.prompt;
+        const rawPromptType = typeof rawPrompt;
+        const rawPromptLen = typeof rawPrompt === "string" ? rawPrompt.length : 0;
+        const rawPromptPreview = typeof rawPrompt === "string"
+          ? rawPrompt.substring(0, 120).replace(/\n/g, "\\n")
+          : String(rawPrompt);
+        dlog(`[DIAG] event.prompt: type=${rawPromptType}, length=${rawPromptLen}, preview="${rawPromptPreview}"`);
+
+        // Also check if the system prompt might be under a different key
+        const eventKeys = Object.keys(event);
+        const keyInfo = eventKeys.map(k => {
+          const v = event[k];
+          const t = typeof v;
+          if (t === "string") return `${k}(string[${v.length}])`;
+          if (Array.isArray(v)) return `${k}(array[${v.length}])`;
+          return `${k}(${t})`;
+        }).join(", ");
+        dlog(`[DIAG] event keys: ${keyInfo}`);
+
+        // Check for alternative system prompt field names
+        if (event.systemPrompt !== undefined) dlog(`[DIAG] event.systemPrompt EXISTS: type=${typeof event.systemPrompt}, len=${typeof event.systemPrompt === "string" ? event.systemPrompt.length : "N/A"}`);
+        if (event.system !== undefined) dlog(`[DIAG] event.system EXISTS: type=${typeof event.system}`);
+
         // Log ctx (2nd arg) — the SDK-provided hook context with session identity
         dlog(`before_prompt_build: ctx=${ctx ? `{sessionKey=${ctx.sessionKey}, sessionId=${ctx.sessionId}, trigger=${ctx.trigger}, channelId=${ctx.channelId}, jobId=${ctx.jobId ?? 'N/A'}}` : 'undefined'}`);
         dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
