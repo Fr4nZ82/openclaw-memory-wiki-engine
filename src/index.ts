@@ -89,13 +89,18 @@ let pluginApi: any = null;  // Cached api reference for USERS.md path resolution
 let lastResolvedSender: string = "unknown";
 
 /**
- * Sender ID resolved from the most recent message_received event.
- * The message_received hook fires BEFORE before_prompt_build and has access
- * to rich event metadata (event.from, event.metadata.senderId) that
- * before_prompt_build does NOT receive (it only gets prompt + messages).
- * We bridge the identity by storing it here.
+ * Sender ID bridge from message_received → before_prompt_build.
+ *
+ * message_received has rich event metadata (event.from, metadata.senderId)
+ * but before_prompt_build only gets {prompt, messages} — no identity info.
+ *
+ * Race-safety: we store a timestamp alongside the ID and enforce:
+ *   1. Expiry: only use if set within the last 10s (same turn)
+ *   2. Consume-once: reset after reading to prevent stale leaks
+ * This ensures that concurrent users or cron jobs never inherit
+ * a stale sender from a different session.
  */
-let lastMessageReceivedSenderId: string = "";
+let msgReceivedBridge: { id: string; ts: number } = { id: "", ts: 0 };
 
 
 // Lazily loaded db.ts module — avoids eager better-sqlite3 native addon load
@@ -195,8 +200,9 @@ function register(api: any): void {
         // Extract numeric ID from senderId (e.g. "telegram:7776007798" → "7776007798")
         // and store for before_prompt_build which has no event metadata
         const numericMatch = senderId.match(/(\d{5,})/);
-        lastMessageReceivedSenderId = numericMatch ? numericMatch[1] : senderId;
-        dlog(`Resolved sender: id=${senderId}, numericId=${lastMessageReceivedSenderId}, name=${senderName}, session=${sessionKey}`);
+        const numericId = numericMatch ? numericMatch[1] : senderId;
+        msgReceivedBridge = { id: numericId, ts: Date.now() };
+        dlog(`Resolved sender: id=${senderId}, numericId=${numericId}, name=${senderName}, session=${sessionKey}`);
 
         const messageText = event.content || event.text || "";
 
@@ -543,10 +549,20 @@ function register(api: any): void {
         dlog(`before_prompt_build: event.metadata=${JSON.stringify(event.metadata ?? {}).substring(0, 300)}`);
         if (event.session) dlog(`before_prompt_build: event.session=${JSON.stringify(event.session).substring(0, 300)}`);
 
+        // Consume the message_received bridge (race-safe: expire after 10s, reset after read)
+        let bridgedSenderId = "";
+        if (msgReceivedBridge.id && (Date.now() - msgReceivedBridge.ts) < 10_000) {
+          bridgedSenderId = msgReceivedBridge.id;
+          dlog(`before_prompt_build: consumed bridge senderId="${bridgedSenderId}" (age=${Date.now() - msgReceivedBridge.ts}ms)`);
+        } else if (msgReceivedBridge.id) {
+          dlog(`before_prompt_build: bridge EXPIRED (age=${Date.now() - msgReceivedBridge.ts}ms, id=${msgReceivedBridge.id})`);
+        }
+        msgReceivedBridge = { id: "", ts: 0 }; // always reset — consume-once
+
         // Resolve sender identity.
-        // Priority: extracted envelope > message_received bridge > message metadata > event metadata > sessionKey parse > historical scan
+        // Priority: extracted envelope > message_received bridge (fresh) > message metadata > event metadata > sessionKey > historical scan
         let senderId = extractedSenderId
-          || lastMessageReceivedSenderId  // ← bridge from message_received hook (has rich event.from)
+          || bridgedSenderId
           || messages[foundMsgIdx]?.metadata?.senderId
           || messages[foundMsgIdx]?.from
           || event.metadata?.senderId
