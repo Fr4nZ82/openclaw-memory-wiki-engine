@@ -548,6 +548,14 @@ function register(api: any): void {
         dlog(`before_prompt_build: event.sessionKey=${event.sessionKey}, event.sessionId=${event.sessionId}`);
         dlog(`before_prompt_build: event.metadata=${JSON.stringify(event.metadata ?? {}).substring(0, 300)}`);
         if (event.session) dlog(`before_prompt_build: event.session=${JSON.stringify(event.session).substring(0, 300)}`);
+        // Check event.context (SDK docs say ctx.sessionKey, ctx.senderId, ctx.channelId, ctx.jobId exist)
+        const ctx = event.context;
+        if (ctx) {
+          dlog(`before_prompt_build: ctx keys: [${Object.keys(ctx).sort().join(', ')}]`);
+          dlog(`before_prompt_build: ctx.sessionKey=${ctx.sessionKey}, ctx.senderId=${ctx.senderId}, ctx.channelId=${ctx.channelId}, ctx.jobId=${ctx.jobId}, ctx.messageProvider=${ctx.messageProvider}`);
+        } else {
+          dlog(`before_prompt_build: event.context is ${ctx}`);
+        }
 
         // Consume the message_received bridge (race-safe: expire after 10s, reset after read)
         let bridgedSenderId = "";
