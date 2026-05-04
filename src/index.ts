@@ -523,19 +523,36 @@ function register(api: any): void {
           return;
         }
 
+        // ---- Debug: dump event object for identity resolution ----
+        const eventKeys = Object.keys(event).filter(k => k !== 'prompt' && k !== 'messages').sort();
+        dlog(`before_prompt_build: event keys: [${eventKeys.join(', ')}]`);
+        dlog(`before_prompt_build: event.sessionKey=${event.sessionKey}, event.sessionId=${event.sessionId}`);
+        dlog(`before_prompt_build: event.metadata=${JSON.stringify(event.metadata ?? {}).substring(0, 300)}`);
+        if (event.session) dlog(`before_prompt_build: event.session=${JSON.stringify(event.session).substring(0, 300)}`);
+
         // Resolve sender identity.
-        // Priority: extracted from Conversation info > message metadata > event metadata > sessionKey parse
+        // Priority: extracted envelope > message metadata > event metadata > sessionKey parse > historical scan
         let senderId = extractedSenderId
           || messages[foundMsgIdx]?.metadata?.senderId
           || messages[foundMsgIdx]?.from
           || event.metadata?.senderId
           || "";
 
+        // Build sessionId from all available sources (different OpenClaw versions use different property names)
         const sessionId = event.sessionKey
+          || event.sessionId
+          || event.session?.key
+          || event.session?.id
           || event.metadata?.sessionKey
+          || event.metadata?.sessionId
           || event.metadata?.channelId
           || (extractedSenderId ? `telegram:${extractedSenderId}` : "unknown");
 
+        dlog(`before_prompt_build: initial senderId="${senderId}", sessionId="${sessionId}"`);
+
+        // Try to extract numeric ID from session key
+        // Handles formats like: "agent:main:telegram:direct:7776007798"
+        //                       "telegram:7776007798"
         if (!senderId && sessionId !== "unknown") {
           const parts = sessionId.split(":");
           const lastPart = parts[parts.length - 1];
@@ -544,6 +561,36 @@ function register(api: any): void {
             dlog(`before_prompt_build: sender extracted from sessionKey: ${senderId}`);
           }
         }
+
+        // Fallback: scan older messages for envelope sender_id
+        // (covers cron in shared sessions where previous messages have Telegram envelopes)
+        if (!senderId) {
+          for (let i = messages.length - 1; i >= 0; i--) {
+            if (i === foundMsgIdx) continue;
+            const msg = messages[i];
+            if (msg.role !== "user") continue;
+            if (Array.isArray(msg.content)) {
+              for (const part of msg.content) {
+                if (part.type === "text" && part.text && isEnvelopePart(part.text.trim())) {
+                  const parsed = parseEnvelopeText(part.text.trim());
+                  if (parsed.senderId) {
+                    senderId = parsed.senderId;
+                    dlog(`before_prompt_build: sender recovered from historical envelope msg[${i}]: ${senderId}`);
+                    break;
+                  }
+                }
+              }
+            } else if (typeof msg.content === "string" && isEnvelopePart(msg.content.trim())) {
+              const parsed = parseEnvelopeText(msg.content.trim());
+              if (parsed.senderId) {
+                senderId = parsed.senderId;
+                dlog(`before_prompt_build: sender recovered from historical string envelope msg[${i}]: ${senderId}`);
+              }
+            }
+            if (senderId) break;
+          }
+        }
+
         if (!senderId) senderId = "unknown";
 
         // Save for the remember tool (BUG-10 fix)
