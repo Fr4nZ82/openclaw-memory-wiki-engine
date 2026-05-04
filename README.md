@@ -173,7 +173,8 @@ Friendly and patient. Prefers step-by-step explanations.
 
 **3. Bootstrapping initial knowledge (Optional):**
 
-If you have legacy notes (`USER.md`, `MEMORY.md`, or a `memory/` folder) in your workspace, you can extract them into structured facts using the AI bootstrap script before starting the system for the first time:
+If you have legacy notes (`USER.md`, `MEMORY.md`, or a `memory/` folder) in your workspace, you can extract them into structured facts using the AI bootstrap script before starting the system for the first time. 
+*Note: This script uses Gemini Flash and requires the `GEMINI_API_KEY` to be set in your environment or in `~/.openclaw/.env`.*
 
 ```bash
 # Run the init script (it will parse markdown and insert facts into the DB)
