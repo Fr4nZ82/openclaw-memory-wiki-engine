@@ -322,6 +322,7 @@ Rules for fact_type:
 - preference: tastes, likes, dislikes.
 - rule: behavioral rules, prohibitions, system instructions.
 - episode: temporary events, emotional states, specific occurrences.
+- plan: future intentions, trips, scheduled events.
 - internal: technical notes, debug info, system status.
 
 IMPORTANT language rule:
@@ -544,6 +545,7 @@ To verify facts were inserted: npx tsx scripts/enroll.ts --dump
         preference: "💚",
         rule: "⚠️",
         episode: "📅",
+        plan: "🔮",
         internal: "⚙️",
       }[fact.fact_type] || "•";
 
