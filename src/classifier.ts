@@ -200,7 +200,8 @@ Analyze the message and respond with valid JSON:
    - bio: biographical data, family relationships, personal history.
    - preference: tastes, likes, dislikes.
    - rule: behavioral rules, prohibitions, system instructions.
-   - episode: temporary events, emotional states, specific occurrences.
+   - episode: temporary events, emotional states, specific occurrences (ONLY PAST OR PRESENT).
+   - plan: future intentions, scheduled events, upcoming trips or meetings (FUTURE).
    - internal: technical notes, debug info, system status (ONLY if the message is technical).
 
 If fact_type is "internal", is_internal MUST be true.
@@ -678,7 +679,7 @@ function normalizeTopics(raw: any): string[] {
  * Validates fact_type — only allowed values.
  */
 function validateFactType(raw: any): ClassificationResult["fact_type"] {
-  const valid = ["fact", "preference", "rule", "episode", "bio", "internal"] as const;
+  const valid = ["fact", "preference", "rule", "episode", "bio", "internal", "plan"] as const;
   return valid.includes(raw) ? raw : "fact";
 }
 

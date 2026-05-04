@@ -25,7 +25,7 @@ import type { PluginConfig } from "./config";
 // ---------------------------------------------------------------------------
 
 /** A permanent fact in the database */
-export type FactType = "fact" | "preference" | "rule" | "episode" | "bio" | "internal";
+export type FactType = "fact" | "preference" | "rule" | "episode" | "bio" | "internal" | "plan";
 
 export interface Fact {
   id: string;
