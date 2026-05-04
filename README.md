@@ -171,11 +171,13 @@ Friendly and patient. Prefers step-by-step explanations.
 
 **2. Auto-sync:** The plugin automatically parses `USERS.md` and syncs to the database on the first agent turn after gateway startup. No manual enrollment steps required.
 
-**3. Legacy CLI (optional, for debugging):**
+**3. Bootstrapping initial knowledge (Optional):**
+
+If you have legacy notes (`USER.md`, `MEMORY.md`, or a `memory/` folder) in your workspace, you can extract them into structured facts using the AI bootstrap script before starting the system for the first time:
 
 ```bash
-# Dump current DB state
-npx tsx scripts/enroll.ts --dump
+# Run the init script (it will parse markdown and insert facts into the DB)
+npx tsx scripts/init.ts --workspace ~/.openclaw/workspace
 ```
 
 ## Configuration
