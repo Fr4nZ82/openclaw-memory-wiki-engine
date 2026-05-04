@@ -214,6 +214,8 @@ If fact_type is "internal", is_internal MUST be true.
    → owner_type: "group", owner_id: "${userGroups[0]?.group_id || "family"}"
    If they say "I prefer coffee":
    → owner_type: "user", owner_id: "${currentUser?.canonical_name.toLowerCase() || currentMessage.sender_id}"
+   IMPORTANT: For future plans, trips, or absences (fact_type: "plan") that affect others, assign them to the family/group so everyone is aware.
+   Example: "I will be in Frankfurt next week" → owner_type: "group", owner_id: "${userGroups[0]?.group_id || "family"}"
 
 ### Output
 
