@@ -229,11 +229,25 @@ async function callGemini(apiKey: string, prompt: string): Promise<string> {
 
 function buildExtractionPrompt(
   workspace: WorkspaceContent,
-  knownUsers: Array<{ sender_id: string; canonical: string; names: string[] }>
+  knownUsers: Array<{ sender_id: string; canonical: string; names: string[] }>,
+  knownGroups: Array<{ group_id: string; group_name: string; scope: string }>
 ): string {
   const usersList = knownUsers
     .map((u) => `- ${u.canonical} (aliases: ${u.names.join(", ")}, sender_id: ${u.sender_id})`)
     .join("\n");
+
+  const groupsList = knownGroups.length > 0
+    ? knownGroups.map(g => {
+        let line = `- ${g.group_id} (${g.group_name})`;
+        if (g.scope) {
+          try {
+            const scopeArr = JSON.parse(g.scope) as string[];
+            if (scopeArr.length > 0) line += `\n  Scope: ${scopeArr.join("; ")}`;
+          } catch { /* ignore malformed scope */ }
+        }
+        return line;
+      }).join("\n")
+    : "- no groups";
 
   const parts: string[] = [];
 
@@ -259,9 +273,7 @@ ${usersList}
 
 ## Known groups
 
-- famiglia (Family group)
-- admin (System administrators)
-- amici (Friends)
+${groupsList}
 
 ## Workspace files to analyze
 
@@ -446,7 +458,6 @@ This command:
 
 Run ONCE after enrollment. The dream engine will generate wiki pages
 automatically on its next scheduled cycle (light: every 6h, REM: 03:00).
-To verify facts were inserted: npx tsx scripts/enroll.ts --dump
     `.trim());
     process.exit(0);
   }
@@ -489,7 +500,7 @@ To verify facts were inserted: npx tsx scripts/enroll.ts --dump
       .all() as UserRow[];
 
     if (users.length === 0) {
-      console.error("❌ No users enrolled. Run enroll.ts first.");
+      console.error("❌ No users enrolled. Define users in USERS.md and start the engine first.");
       process.exit(1);
     }
 
@@ -520,7 +531,11 @@ To verify facts were inserted: npx tsx scripts/enroll.ts --dump
     const embeddingUrl = resolveEmbeddingUrl();
 
     // Build prompt and call LLM
-    const prompt = buildExtractionPrompt(workspace, knownUsers);
+    const groups = db
+      .prepare("SELECT group_id, group_name, scope FROM groups")
+      .all() as Array<{ group_id: string; group_name: string; scope: string }>;
+
+    const prompt = buildExtractionPrompt(workspace, knownUsers, groups);
     const response = await callGemini(apiKey, prompt);
 
     // Parse facts
