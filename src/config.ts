@@ -37,14 +37,11 @@ export interface PluginConfig {
   /** Nightly REM dream time (HH:MM format) */
   dreamRemTime: string;
 
-  /** Conversation turns to keep in custom compaction */
+  /** Conversation turns to keep in custom compaction (1 turn = 1 user + 1 assistant msg) */
   keepTurns: number;
 
   /** Max token budget for context injection into prompt */
   recallBudgetTokens: number;
-
-  /** Recent messages the classifier sees (sliding window) */
-  classifierWindowSize: number;
 
   /** Number of facts to return in hybrid search */
   recallTopK: number;
@@ -89,12 +86,11 @@ export const DEFAULT_CONFIG: PluginConfig = {
   dreamIntervalHours: 6,
   dreamRemTime: "03:00",
 
-  // Compaction
-  keepTurns: 4,
+  // Compaction & Context Window
+  keepTurns: 6,
 
   // Recall
   recallBudgetTokens: 4000,
-  classifierWindowSize: 4,
   recallTopK: 10,
   dreamCaptureThreshold: 15, // Trigger auto-dream se i captures non processati superano questo limite
 

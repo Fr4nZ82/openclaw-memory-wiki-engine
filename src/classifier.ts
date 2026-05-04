@@ -248,10 +248,11 @@ export async function classifyMessage(
 ): Promise<ClassificationResult> {
   try {
     // 1. Retrieve the sliding window from archive
+    // We align the classifier window with the agent's context window (keepTurns * 2)
     const windowMessages = getRecentMessages(
       db,
       sessionId,
-      config.classifierWindowSize
+      config.keepTurns * 2
     );
 
     // 2. Get the current session topic (from latest capture)

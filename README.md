@@ -196,7 +196,7 @@ All settings are optional — defaults work out of the box. Configure via `openc
           "dreamIntervalHours": 6,
           "dreamRemTime": "03:00",
           "contextBudget": 1100,
-          "keepTurns": 4
+          "keepTurns": 6
         }
       }
     }
@@ -213,9 +213,8 @@ All settings are optional — defaults work out of the box. Configure via `openc
 | `embeddingModel` | `nomic-embed-text` | Ollama model for embeddings |
 | `embeddingDimensions` | `768` | Embedding vector size |
 | `contextBudget` | `1100` | Max tokens injected per prompt |
-| `keepTurns` | `4` | Conversation turns to keep (compaction) |
+| `keepTurns` | `6` | Conversation turns to keep (also used as classifier window) |
 | `classifierModel` | `flash` | LLM model for classification |
-| `classifierContextWindow` | `5` | Messages to include in classifier context |
 | `dreamIntervalHours` | `6` | Hours between light dream cycles |
 | `dreamRemTime` | `03:00` | Time for nightly deep dream (HH:MM) |
 | `minMessageLength` | `10` | Min chars to classify a message |
