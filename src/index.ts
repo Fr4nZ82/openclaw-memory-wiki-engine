@@ -685,12 +685,13 @@ function register(api: any): void {
 
         if (Array.isArray(finalMessages) && finalMessages.length > keepMessages) {
           let candidateIndex = finalMessages.length - keepMessages;
-          const originalCandidate = candidateIndex;
           
           // SAFE TRUNCATION: Gemini will throw 400 INVALID_ARGUMENT if we cut history in the
           // middle of a function_call / function_response pair, or if the history starts with
-          // an orphaned model/tool message. We must walk forward until we find a CLEAN user message.
-          while (candidateIndex < finalMessages.length) {
+          // an orphaned model/tool message. We must walk BACKWARD until we find a CLEAN user message.
+          // This ensures we never sever a tool call from its response, and the history always starts
+          // with a standard user message.
+          while (candidateIndex > 0) {
             const msg = finalMessages[candidateIndex];
             if (msg.role === "user") {
               // Check if it's a clean user message (no tool_result/functionResponse parts)
@@ -701,15 +702,7 @@ function register(api: any): void {
                 break; // Found a safe boundary
               }
             }
-            candidateIndex++;
-          }
-
-          if (candidateIndex >= finalMessages.length) {
-            // Fallback: If no clean boundary was found, we MUST NOT return an empty array.
-            // An empty array guarantees a "contents is not specified" 400 error from Gemini.
-            // Better to fallback to the original truncation point and risk a sequence error.
-            dlog(`assemble(): WARN exhausted all messages looking for safe boundary. Falling back to original index.`);
-            candidateIndex = originalCandidate;
+            candidateIndex--;
           }
 
           finalMessages = finalMessages.slice(candidateIndex);
