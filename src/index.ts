@@ -337,17 +337,18 @@ function register(api: any): void {
 
       try {
         // ─── DIAGNOSTIC: system prompt investigation (2026-05-04) ───
-        // Log the raw state of event.prompt BEFORE any processing.
-        // This tells us whether OpenClaw provides the base system prompt here.
+        // ALL LOGS GO TO GATEWAY CONSOLE (ocLog.info) — remove when fixed!
         const rawPrompt = event.prompt;
         const rawPromptType = typeof rawPrompt;
         const rawPromptLen = typeof rawPrompt === "string" ? rawPrompt.length : 0;
         const rawPromptPreview = typeof rawPrompt === "string"
           ? rawPrompt.substring(0, 120).replace(/\n/g, "\\n")
           : String(rawPrompt);
-        dlog(`[DIAG] event.prompt: type=${rawPromptType}, length=${rawPromptLen}, preview="${rawPromptPreview}"`);
+        ocLog.info(`[MWE:DIAG] ══════ before_prompt_build START ══════`);
+        ocLog.info(`[MWE:DIAG] event.prompt: type=${rawPromptType}, length=${rawPromptLen}`);
+        ocLog.info(`[MWE:DIAG] event.prompt preview: "${rawPromptPreview}"`);
 
-        // Also check if the system prompt might be under a different key
+        // Dump ALL event keys with types
         const eventKeys = Object.keys(event);
         const keyInfo = eventKeys.map(k => {
           const v = event[k];
@@ -356,15 +357,15 @@ function register(api: any): void {
           if (Array.isArray(v)) return `${k}(array[${v.length}])`;
           return `${k}(${t})`;
         }).join(", ");
-        dlog(`[DIAG] event keys: ${keyInfo}`);
+        ocLog.info(`[MWE:DIAG] event keys: ${keyInfo}`);
 
-        // Check for alternative system prompt field names
-        if (event.systemPrompt !== undefined) dlog(`[DIAG] event.systemPrompt EXISTS: type=${typeof event.systemPrompt}, len=${typeof event.systemPrompt === "string" ? event.systemPrompt.length : "N/A"}`);
-        if (event.system !== undefined) dlog(`[DIAG] event.system EXISTS: type=${typeof event.system}`);
+        // Check alternative field names
+        if (event.systemPrompt !== undefined) ocLog.info(`[MWE:DIAG] ⚡ event.systemPrompt EXISTS: type=${typeof event.systemPrompt}, len=${typeof event.systemPrompt === "string" ? event.systemPrompt.length : "N/A"}`);
+        if (event.system !== undefined) ocLog.info(`[MWE:DIAG] ⚡ event.system EXISTS: type=${typeof event.system}`);
+        if (event.basePrompt !== undefined) ocLog.info(`[MWE:DIAG] ⚡ event.basePrompt EXISTS: type=${typeof event.basePrompt}, len=${typeof event.basePrompt === "string" ? event.basePrompt.length : "N/A"}`);
 
-        // Log ctx (2nd arg) — the SDK-provided hook context with session identity
-        dlog(`before_prompt_build: ctx=${ctx ? `{sessionKey=${ctx.sessionKey}, sessionId=${ctx.sessionId}, trigger=${ctx.trigger}, channelId=${ctx.channelId}, jobId=${ctx.jobId ?? 'N/A'}}` : 'undefined'}`);
-        dlog(`before_prompt_build: event keys=${Object.keys(event).join(', ')}`);
+        // ctx info
+        ocLog.info(`[MWE:DIAG] ctx=${ctx ? `{sessionKey=${ctx.sessionKey}, trigger=${ctx.trigger}, channelId=${ctx.channelId}}` : 'undefined'}`);
 
         // ---------------------------------------------------------------
         // Extract the last REAL user message from event.messages.
@@ -659,29 +660,43 @@ function register(api: any): void {
         const result: Record<string, string> = {
           prependContext: recallCtx.systemContext,
         };
+        ocLog.info(`[MWE:DIAG] prependContext length: ${recallCtx.systemContext?.length ?? 0}`);
 
         // Apply prompt patches (declarative JSON) from workspace convention path
         const patchesFile = resolvePromptPatchesPath(pluginApi);
         let basePrompt = event.prompt ?? "";
+        ocLog.info(`[MWE:DIAG] basePrompt from event.prompt: length=${basePrompt.length}, empty=${!basePrompt}`);
+        ocLog.info(`[MWE:DIAG] patchesFile: ${patchesFile}, exists=${fs.existsSync(patchesFile)}`);
+
         if (basePrompt && fs.existsSync(patchesFile)) {
           basePrompt = applyPromptPatches(basePrompt, patchesFile);
-          dlog(`[Prompt] Patches applied from ${patchesFile}`);
+          ocLog.info(`[MWE:DIAG] Patches applied, basePrompt now: length=${basePrompt.length}`);
+        } else {
+          ocLog.info(`[MWE:DIAG] Patches SKIPPED: basePrompt empty=${!basePrompt}, patchesFile exists=${fs.existsSync(patchesFile)}`);
         }
 
         // Inject <users_context> and Multi-User directive
         const usersPath = resolveUsersFilePath(pluginApi);
         const registry = loadRegistry(usersPath);
+        ocLog.info(`[MWE:DIAG] registry: ${registry.users.length} users, basePrompt truthy=${!!basePrompt}`);
+
         if (registry.users.length > 0 && basePrompt) {
           const usersCtx = buildUsersContext(registry, senderId);
           basePrompt = basePrompt + "\n\n" + usersCtx + "\n\n" + MULTI_USER_DIRECTIVE;
-          dlog(`[Prompt] <users_context> injected for sender=${senderId}`);
+          ocLog.info(`[MWE:DIAG] <users_context> injected, basePrompt now: length=${basePrompt.length}`);
+        } else {
+          ocLog.info(`[MWE:DIAG] ⚠️ <users_context> SKIPPED: users=${registry.users.length}, basePrompt truthy=${!!basePrompt}`);
         }
 
         // Only override systemPrompt if we actually modified it
         if (basePrompt && (fs.existsSync(patchesFile) || registry.users.length > 0)) {
           result.systemPrompt = basePrompt;
+          ocLog.info(`[MWE:DIAG] ✅ result.systemPrompt SET: length=${basePrompt.length}, first120="${basePrompt.substring(0, 120).replace(/\n/g, '\\n')}"`);
+        } else {
+          ocLog.info(`[MWE:DIAG] ❌ result.systemPrompt NOT SET: basePrompt empty=${!basePrompt}`);
         }
 
+        ocLog.info(`[MWE:DIAG] ══════ before_prompt_build RETURN: keys=${Object.keys(result).join(',')} ══════`);
         return result;
       } catch (error) {
         ocLog.warn("[Recall] Error injecting context:", error);
