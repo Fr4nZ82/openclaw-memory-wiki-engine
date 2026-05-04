@@ -208,14 +208,13 @@ If fact_type is "internal", is_internal MUST be true.
 
 7. **owner_type and owner_id**: who OWNS the fact (not who says it).
    owner_id must be the CANONICAL NAME (first name, lowercase) from the known users list.
+   If a fact aligns with a group's Scope (e.g., shared plans, absences affecting others, or household items), assign it to that group so all members are aware.
    If ${senderLabel} says "Bob doesn't like pesto":
    → look up Bob in the known users list → use their canonical name as owner_id
-   If they say "we need detergent" (family fact):
+   If they say "we need detergent" or "I'll be in Frankfurt for 3 days":
    → owner_type: "group", owner_id: "${userGroups[0]?.group_id || "family"}"
-   If they say "I prefer coffee":
+   If they say "I prefer coffee" or "I have a work call at 15:00":
    → owner_type: "user", owner_id: "${currentUser?.canonical_name.toLowerCase() || currentMessage.sender_id}"
-   IMPORTANT: For future plans, trips, or absences (fact_type: "plan") that affect others, assign them to the family/group so everyone is aware.
-   Example: "I will be in Frankfurt next week" → owner_type: "group", owner_id: "${userGroups[0]?.group_id || "family"}"
 
 ### Output
 
