@@ -83,8 +83,7 @@ function buildFoundationPages(
   const registry = getCachedRegistry();
 
   // --- Person pages from DB users table ---
-  const users = db.prepare("SELECT slug, names, sender_id FROM users").all() as Array<{
-    slug: string;
+  const users = db.prepare("SELECT names, sender_id FROM users").all() as Array<{
     names: string;
     sender_id: string;
   }>;
