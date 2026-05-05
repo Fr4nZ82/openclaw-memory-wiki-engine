@@ -462,6 +462,20 @@ export async function updateWikiPages(
   }
 
   // 2. Find all unique topics with enough facts
+  // Load known user slugs
+  const knownUsers = new Set<string>();
+  try {
+    const users = db.prepare("SELECT names FROM users").all() as Array<{names: string}>;
+    for (const u of users) {
+      const names = JSON.parse(u.names) as string[];
+      if (names.length > 0) {
+        knownUsers.add(names[0].toLowerCase().replace(/[^a-z0-9]+/g, "_"));
+      }
+    }
+  } catch (e) {
+    logger.warn(`[Dream REM] Could not load users for threshold bypass: ${e}`);
+  }
+
   // We extract all active facts, expand their topics array, and count.
   const allFacts = db.prepare(`SELECT * FROM facts WHERE is_active = 1 ORDER BY fact_type, updated_at DESC`).all() as Fact[];
   const topicStats: Record<string, { fact_count: number; rule_count: number; owner_ids: Set<string>; max_updated_at: number }> = {};
@@ -491,8 +505,8 @@ export async function updateWikiPages(
   }
 
   for (const [topic, stats] of Object.entries(topicStats)) {
-    // Thresholds: 3+ facts OR 1+ rule OR 2+ distinct owners
-    if (stats.fact_count >= 3 || stats.rule_count >= 1 || stats.owner_ids.size >= 2) {
+    // Thresholds: 3+ facts OR 1+ rule OR 2+ distinct owners OR is a known user
+    if (stats.fact_count >= 3 || stats.rule_count >= 1 || stats.owner_ids.size >= 2 || knownUsers.has(topic.toLowerCase())) {
       const fileName = `${topic.toLowerCase().replace(/[^a-z0-9]+/g, "_")}.md`;
       const relativePath = path.join("pages", fileName);
       const filePath = path.join(config.wikiPath, relativePath);

@@ -171,7 +171,15 @@ export async function semanticMergePage(
 
   const existingContent = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf-8") : "";
   const now = new Date().toISOString().split("T")[0];
-  const createdDate = fs.existsSync(filePath) ? fs.statSync(filePath).birthtime.toISOString().split("T")[0] : now;
+  let createdDate = now;
+  if (existingContent) {
+    const match = existingContent.match(/^created:\s*(.+)$/m);
+    if (match) {
+      createdDate = match[1].trim();
+    } else {
+      try { createdDate = fs.statSync(filePath).birthtime.toISOString().split("T")[0]; } catch(e) {}
+    }
+  }
 
   // Extract tags, sources, and check confidence
   const tagsSet = new Set<string>([targetEntity.topic]);
@@ -268,18 +276,28 @@ Facts to include/merge:
 ${factsList}
 """`;
 
-    try {
-      if (config.debug) logger.debug(`[Wiki Compiler] Requesting semantic merge for ${targetEntity.title} from LLM...`);
-      const response = await callLlmTask(api, prompt);
-      
-      const parsed = parseJsonFromLlm(response, `semanticMergePage(${relativePath})`, logger);
-      if (parsed.mergedBody) mergedBody = parsed.mergedBody;
-      if (parsed.description) description = parsed.description;
-      if (Array.isArray(parsed.aliases)) aliases = parsed.aliases;
-      
-    } catch (e) {
-      logger.error(`[Wiki Compiler] LLM failed for ${relativePath}. Aborting compilation: ${e}`);
-      throw e;
+    let attempts = 0;
+    const maxAttempts = 2;
+    while (attempts < maxAttempts) {
+      try {
+        attempts++;
+        if (config.debug) logger.debug(`[Wiki Compiler] Requesting semantic merge for ${targetEntity.title} from LLM (Attempt ${attempts}/${maxAttempts})...`);
+        const response = await callLlmTask(api, prompt);
+        
+        const parsed = parseJsonFromLlm(response, `semanticMergePage(${relativePath})`, logger);
+        if (parsed.mergedBody) mergedBody = parsed.mergedBody;
+        if (parsed.description) description = parsed.description;
+        if (Array.isArray(parsed.aliases)) aliases = parsed.aliases;
+        break; // Success
+      } catch (e) {
+        if (attempts >= maxAttempts) {
+          logger.error(`[Wiki Compiler] LLM failed for ${relativePath} after ${maxAttempts} attempts. Aborting compilation: ${e}`);
+          throw e;
+        } else {
+          logger.warn(`[Wiki Compiler] LLM failed for ${relativePath} (Attempt ${attempts}/${maxAttempts}). Retrying... Error: ${e}`);
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
     }
   } catch (e) {
       logger.error(`[Wiki Compiler] Directory read failed: ${e}`);
