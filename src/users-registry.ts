@@ -502,15 +502,6 @@ export function resolveUsersFilePath(api: any): string {
   return path.join(workspaceDir, "USERS.md");
 }
 
-/**
- * Resolve the path to prompt-patches.json.
- * Convention: <workspace>/.openclaw/prompt-patches.json
- * No external config needed — follows workspace structure.
- */
-export function resolvePromptPatchesPath(api: any): string {
-  const workspaceDir = resolveWorkspaceDir(api);
-  return path.join(workspaceDir, ".openclaw", "prompt-patches.json");
-}
 
 /**
  * Internal: resolve workspace directory from API or env.

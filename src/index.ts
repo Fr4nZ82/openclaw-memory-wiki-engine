@@ -14,8 +14,6 @@
  *   supersede.ts       → fact supersedence logic
  *   dream.ts           → memory consolidation (light + REM)
  *   users-registry.ts  → USERS.md parser, DB sync, prompt context builder
- *   prompt-patcher.ts  → declarative system prompt modification
- *
  * Registered hooks:
  *   - message_received    → captures user messages
  *   - message_sending     → archives assistant responses
@@ -51,10 +49,8 @@ import {
   syncUsersToDb,
   buildUsersContext,
   resolveUsersFilePath,
-  resolvePromptPatchesPath,
   MULTI_USER_DIRECTIVE,
 } from "./users-registry";
-import { applyPromptPatches } from "./prompt-patcher";
 import {
   wikiInit,
   wikiIngest,
