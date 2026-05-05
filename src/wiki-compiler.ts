@@ -217,7 +217,7 @@ export async function semanticMergePage(
            const canonicalSlug = canonical.toLowerCase().replace(/[^a-z0-9]+/g, "_");
            const otherNames = names.slice(1);
            if (otherNames.length > 0) {
-             aliasesMap.push(`- Canonical slug: ${canonicalSlug} (Aliases: ${otherNames.join(", ")}). Use [[${canonicalSlug}|Alias]]`);
+             aliasesMap.push(`- Canonical slug: ${canonicalSlug} (Aliases: ${otherNames.join(", ")}). Replace the alias with the canonical name and use [[${canonicalSlug}]]`);
            } else {
              aliasesMap.push(`- Canonical slug: ${canonicalSlug}`);
            }
@@ -225,7 +225,7 @@ export async function semanticMergePage(
         }
       }
       if (aliasesMap.length > 0) {
-        userAliasesText = "\nKnown Users & Aliases (Link to canonical slugs when you encounter any alias):\n" + aliasesMap.join("\n");
+        userAliasesText = "\nKnown Users & Aliases (Normalize all aliases to their canonical name when linking):\n" + aliasesMap.join("\n");
       }
     } catch (e) {
       logger.warn(`[Wiki Compiler] Could not load user aliases: ${e}`);
@@ -235,7 +235,7 @@ export async function semanticMergePage(
 DO NOT use bullet point lists if possible. Write a cohesive, narrative prose describing the entity/concept.
 Insert Obsidian-compatible [[wikilinks]] for known concepts and entities naturally in the text.
 If old facts are contradicted by new ones, update the narrative.
-If a known entity has aliases, use [[canonical_slug|alias]] format.
+If a known entity is referred to by an alias, replace the alias with the canonical name using [[canonical_slug]].
 
 CRITICAL CHRONOLOGY INSTRUCTION:
 Use specific dated episodes or future events ONLY as evidence to deduce skills, habits, roles, or relationships (e.g., "Tizen developer"). Summarize events in the past tense to provide historical context, but DO NOT turn the wiki into an appointment calendar. Do not include future dates or exact operational appointments in the final narrative.
