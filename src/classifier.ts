@@ -440,8 +440,11 @@ function releaseAuditLock(): void {
  * Same format as openclaw-samvise-hooks/audit.ts so all LLM calls
  * (gateway + direct) appear in one file.
  * Protected by a lock file to avoid corruption from concurrent writes.
+ *
+ * systemPrompt = the classifier prompt sent to Gemini
+ * messages = the LLM response (classification JSON)
  */
-function writeClassifierAudit(prompt: string, model: string): void {
+function writeClassifierAudit(prompt: string, model: string, response: string): void {
   if (!acquireAuditLock()) return; // skip silently — don't block the pipeline
 
   try {
@@ -454,7 +457,7 @@ function writeClassifierAudit(prompt: string, model: string): void {
       imagesCount: 0,
       systemPrompt: prompt,
       messagesCount: 1,
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: "assistant", content: response }],
     };
 
     let history: unknown[] = [];
@@ -544,7 +547,7 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
       }
 
       // Log to shared apiaudit.txt (same file as samvise-hooks audit)
-      writeClassifierAudit(prompt, model);
+      writeClassifierAudit(prompt, model, content);
 
       return content;
     } catch (e) {
