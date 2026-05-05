@@ -155,6 +155,7 @@ ${newContent.substring(0, 4000)}
  */
 export async function semanticMergePage(
   api: any,
+  db: Database.Database,
   config: PluginConfig,
   targetEntity: { topic: string; title: string },
   facts: any[],
@@ -205,10 +206,35 @@ export async function semanticMergePage(
       knownSlugs.push(...files.filter(f => f.endsWith(".md")).map(f => f.replace(".md", "")));
     } catch {}
 
+    let userAliasesText = "";
+    try {
+      const users = db.prepare("SELECT names FROM users").all() as Array<{names: string}>;
+      const aliasesMap: string[] = [];
+      for (const u of users) {
+        const names = JSON.parse(u.names) as string[];
+        if (names.length > 0) {
+           const canonical = names[0];
+           const canonicalSlug = canonical.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+           const otherNames = names.slice(1);
+           if (otherNames.length > 0) {
+             aliasesMap.push(`- Canonical slug: ${canonicalSlug} (Aliases: ${otherNames.join(", ")}). Use [[${canonicalSlug}|Alias]]`);
+           } else {
+             aliasesMap.push(`- Canonical slug: ${canonicalSlug}`);
+           }
+           if (!knownSlugs.includes(canonicalSlug)) knownSlugs.push(canonicalSlug);
+        }
+      }
+      if (aliasesMap.length > 0) {
+        userAliasesText = "\nKnown Users & Aliases (Link to canonical slugs when you encounter any alias):\n" + aliasesMap.join("\n");
+      }
+    } catch (e) {
+      logger.warn(`[Wiki Compiler] Could not load user aliases: ${e}`);
+    }
+
     const prompt = `Rewrite the following wiki page by merging the new facts.
 DO NOT use bullet point lists if possible. Write a cohesive, narrative prose describing the entity/concept.
 Insert Obsidian-compatible [[wikilinks]] for known concepts and entities naturally in the text.
-If old facts are contradicted by new ones, update the narrative.
+If a known entity has aliases, use [[canonical_slug|alias]] format.
 
 CRITICAL CHRONOLOGY INSTRUCTION:
 Use specific dated episodes or future events ONLY as evidence to deduce skills, habits, roles, or relationships (e.g., "Tizen developer"). Summarize events in the past tense to provide historical context, but DO NOT turn the wiki into an appointment calendar. Do not include future dates or exact operational appointments in the final narrative.
@@ -229,7 +255,7 @@ Return a JSON object with this exact structure:
 IMPORTANT: Ensure the JSON is strictly valid. Since \`mergedBody\` contains a long markdown text, you MUST properly escape all double quotes (\\") and newlines (\\\\n) inside strings.
 
 Known slugs for wikilinks:
-${knownSlugs.length > 0 ? knownSlugs.join(", ") : "None yet."}
+${knownSlugs.length > 0 ? knownSlugs.join(", ") : "None yet."}${userAliasesText}
 
 Current Text:
 """

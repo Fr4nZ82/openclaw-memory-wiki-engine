@@ -468,6 +468,12 @@ export async function updateWikiPages(
   
   for (const f of allFacts) {
     const tList = jsonToTopics(f.topics);
+    // Explicitly add owner as a topic to generate personal/group wiki pages
+    if ((f.owner_type === "user" || f.owner_type === "group") && f.owner_id && f.owner_id !== "system") {
+      const ownerSlug = f.owner_id.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+      if (!tList.includes(ownerSlug)) tList.push(ownerSlug);
+    }
+
     const factTime = new Date(f.updated_at).getTime();
     for (const t of tList) {
       const topicLower = t.toLowerCase();
@@ -505,6 +511,10 @@ export async function updateWikiPages(
       // Load facts for this topic
       const factsForTopic = allFacts.filter(f => {
         const lowerTopics = jsonToTopics(f.topics).map(t => t.toLowerCase());
+        if ((f.owner_type === "user" || f.owner_type === "group") && f.owner_id && f.owner_id !== "system") {
+          const ownerSlug = f.owner_id.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+          if (!lowerTopics.includes(ownerSlug)) lowerTopics.push(ownerSlug);
+        }
         return lowerTopics.includes(topic);
       });
       
@@ -514,7 +524,7 @@ export async function updateWikiPages(
       const targetEntity = { topic, title: pageTitle };
       
       try {
-        const updated = await semanticMergePage(api, config, targetEntity, factsForTopic, logger);
+        const updated = await semanticMergePage(api, db, config, targetEntity, factsForTopic, logger);
         if (updated) pagesUpdated++;
       } catch (e) {
         logger.error(`[Dream REM] Failed to compile wiki page for topic "${topic}": ${e}`);
