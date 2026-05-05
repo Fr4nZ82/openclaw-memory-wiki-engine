@@ -494,7 +494,7 @@ function writeClassifierAudit(prompt: string, model: string, response: string): 
  *
  * Uses the REST API with JSON response mode for fast, structured output.
  */
-export async function callLlmTask(api: any, prompt: string, callerLabel?: string): Promise<string> {
+export async function callLlmTask(api: any, prompt: string, callerLabel?: string, timeoutMs: number = 60000): Promise<string> {
   const apiKey = await resolveGeminiApiKey(api);
   if (!apiKey) {
     throw new Error("No Gemini API key found (checked api.runtime.modelAuth, env, ~/.openclaw/.env)");
@@ -510,7 +510,7 @@ export async function callLlmTask(api: any, prompt: string, callerLabel?: string
     const label = callerLabel || "unknown";
     const startTime = Date.now();
     try {
-      log(`[${label}] Calling Gemini API (${model}, attempt ${attempt}/${MAX_RETRIES}). Prompt length: ${prompt.length} chars...`);
+      log(`[${label}] Calling Gemini API (${model}, attempt ${attempt}/${MAX_RETRIES}). Prompt length: ${prompt.length} chars, timeout: ${timeoutMs}ms...`);
 
       const response = await fetch(url, {
         method: "POST",
@@ -523,7 +523,7 @@ export async function callLlmTask(api: any, prompt: string, callerLabel?: string
             maxOutputTokens: 16384,
           },
         }),
-        signal: AbortSignal.timeout(60000), // 1 minute timeout per attempt
+        signal: AbortSignal.timeout(timeoutMs),
       });
 
       const durationMs = Date.now() - startTime;

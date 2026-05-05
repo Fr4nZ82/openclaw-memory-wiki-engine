@@ -115,7 +115,7 @@ ${newContent.substring(0, 4000)}
 
   try {
     if (config.debug) logger.debug(`[Wiki Compiler] Extracting delta from ${relativePath} with LLM...`);
-    let response = await callLlmTask(api, prompt, "shadow-diff");
+    let response = await callLlmTask(api, prompt, "shadow-diff", 120000);
 
     const facts = parseJsonFromLlm(response, "extractDelta", logger);
     if (Array.isArray(facts) && facts.length > 0) {
@@ -282,7 +282,7 @@ ${factsList}
       try {
         attempts++;
         if (config.debug) logger.debug(`[Wiki Compiler] Requesting semantic merge for ${targetEntity.title} from LLM (Attempt ${attempts}/${maxAttempts})...`);
-        const response = await callLlmTask(api, prompt, "wiki-merge");
+        const response = await callLlmTask(api, prompt, "wiki-merge", 120000);
         
         const parsed = parseJsonFromLlm(response, `semanticMergePage(${relativePath})`, logger);
         if (parsed.mergedBody) mergedBody = parsed.mergedBody;
