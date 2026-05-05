@@ -522,7 +522,7 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
             maxOutputTokens: 16384,
           },
         }),
-        signal: AbortSignal.timeout(180000), // 3 minutes timeout per attempt
+        signal: AbortSignal.timeout(60000), // 1 minute timeout per attempt
       });
 
       const durationMs = Date.now() - startTime;
