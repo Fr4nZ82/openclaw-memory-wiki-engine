@@ -244,14 +244,17 @@ async function promoteCapture(
   let embeddingBuffer: Buffer | null = null;
   if (ollamaOnline) {
     try {
+      const embStart = Date.now();
       const embedding = await generateEmbedding(capture.fact_text, config);
       embeddingBuffer = serializeEmbedding(embedding);
+      logger.info(`[Dream] Embedding generated in ${Date.now() - embStart}ms for capture #${capture.id}`);
     } catch {
       logger.warn(`[Dream] Embedding failed for capture #${capture.id}`);
     }
   }
 
   // Check supersedence
+  const ssStart = Date.now();
   const supersedeCheck = await checkSupersedence(
     api,
     db,
@@ -261,6 +264,7 @@ async function promoteCapture(
     capture.owner_type,
     capture.owner_id
   );
+  logger.info(`[Dream] Supersedence check completed in ${Date.now() - ssStart}ms for capture #${capture.id}: ${supersedeCheck.reason}`);
 
   // Transaction: insert fact + optional supersedence + mark promoted
   const promote = db.transaction(() => {

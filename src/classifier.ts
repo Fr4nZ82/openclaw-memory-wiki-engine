@@ -286,7 +286,7 @@ export async function classifyMessage(
 
     // 5. Call the LLM
     log(`Calling Gemini Flash...`);
-    const response = await callLlmTask(api, prompt);
+    const response = await callLlmTask(api, prompt, "classifier");
     log(`FULL GEMINI RESPONSE:\n${response}`);
 
     // 6. Parse the response
@@ -494,7 +494,7 @@ function writeClassifierAudit(prompt: string, model: string, response: string): 
  *
  * Uses the REST API with JSON response mode for fast, structured output.
  */
-export async function callLlmTask(api: any, prompt: string): Promise<string> {
+export async function callLlmTask(api: any, prompt: string, callerLabel?: string): Promise<string> {
   const apiKey = await resolveGeminiApiKey(api);
   if (!apiKey) {
     throw new Error("No Gemini API key found (checked api.runtime.modelAuth, env, ~/.openclaw/.env)");
@@ -507,9 +507,10 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
   let lastError: Error | unknown;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const label = callerLabel || "unknown";
+    const startTime = Date.now();
     try {
-      log(`Calling Gemini API (${model}, attempt ${attempt}/${MAX_RETRIES}). Prompt length: ${prompt.length} chars...`);
-      const startTime = Date.now();
+      log(`[${label}] Calling Gemini API (${model}, attempt ${attempt}/${MAX_RETRIES}). Prompt length: ${prompt.length} chars...`);
 
       const response = await fetch(url, {
         method: "POST",
@@ -536,7 +537,7 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
       const finishReason = data?.candidates?.[0]?.finishReason;
       const content = data?.candidates?.[0]?.content?.parts?.[0]?.text;
       
-      log(`Gemini response received in ${durationMs}ms. finishReason=${finishReason}, content length=${content?.length || 0}`);
+      log(`[${label}] Gemini response received in ${durationMs}ms. finishReason=${finishReason}, content length=${content?.length || 0}`);
       
       if (finishReason === "MAX_TOKENS") {
         log("WARNING: Gemini output was truncated due to MAX_TOKENS!");
@@ -552,7 +553,7 @@ export async function callLlmTask(api: any, prompt: string): Promise<string> {
       return content;
     } catch (e) {
       lastError = e;
-      log(`Attempt ${attempt} failed: ${e instanceof Error ? e.message : e}`);
+      log(`[${label}] Attempt ${attempt} failed after ${Date.now() - startTime}ms: ${e instanceof Error ? e.message : e}`);
       if (attempt < MAX_RETRIES) {
         const delay = attempt * 2000; // 2s, 4s...
         log(`Waiting ${delay}ms before next attempt...`);

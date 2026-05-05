@@ -255,7 +255,7 @@ Respond ONLY with JSON, no markdown, no explanations.`;
 
   log(`Calling Gemini for supersedence check: "${newFactText.substring(0, 60)}..." vs ${candidates.length} candidates`);
 
-  const response = await callLlmTask(api, prompt);
+  const response = await callLlmTask(api, prompt, "supersede");
   log(`Gemini supersedence response: ${response}`);
 
   // Parse the response
