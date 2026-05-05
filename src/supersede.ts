@@ -11,18 +11,31 @@
  *
  * Supersedence is executed by the light dream when promoting
  * a capture to a fact. It's not real-time (needs reflection).
+ *
+ * Strategy (V2 — LLM-powered):
+ *   1. Find candidate facts with same owner + overlapping topics
+ *   2. If embeddings available, pre-filter by cosine > 0.75 (broad net)
+ *   3. Send top candidates to Gemini Flash for semantic verification
+ *   4. Gemini decides: does the new fact supersede any candidate?
+ *
+ * This replaces the pure cosine-threshold approach which couldn't
+ * distinguish corrections from different-but-similar facts.
  */
 
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
-import type { Fact, SessionCapture } from "./db";
-import { jsonToTopics, hasDistinctiveKeywordDifference } from "./utils";
+import type { Fact } from "./db";
+import { jsonToTopics } from "./utils";
 import {
   generateEmbedding,
   cosineSimilarity,
   deserializeEmbedding,
   isOllamaAvailable,
 } from "./embedding";
+import { callLlmTask } from "./classifier";
+import { dbg } from "./debug";
+
+const log = dbg("supersede");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,19 +60,15 @@ export interface SupersedeCheck {
 /**
  * Checks if a new fact supersedes an existing fact.
  *
- * Two-pass strategy:
+ * Three-phase strategy:
  *   1. Find facts with the SAME owner and overlapping topics
- *   2. If candidates found, verify semantic similarity
- *
- * A fact supersedes if:
- *   - Same owner (owner_type + owner_id)
- *   - Same topic (at least 1 topic in common)
- *   - High semantic similarity (cosine > 0.92) + keyword guard, OR
- *     same entity mentioned in the text
+ *   2. Pre-filter with embedding similarity (cosine > 0.75) if available
+ *   3. Verify with Gemini Flash — the LLM decides if it's a true supersedence
  *
  * @returns The superseded fact (if found), otherwise null
  */
 export async function checkSupersedence(
+  api: any,
   db: Database.Database,
   config: PluginConfig,
   newFactText: string,
@@ -78,15 +87,36 @@ export async function checkSupersedence(
     };
   }
 
-  // Step 2 — Verify semantic similarity (if Ollama is online)
+  // Step 2 — Pre-filter with embeddings if available (broad cosine > 0.75)
+  let filteredCandidates = candidates;
   const ollamaOnline = await isOllamaAvailable(config);
 
   if (ollamaOnline) {
-    return await checkWithEmbedding(config, newFactText, candidates);
+    filteredCandidates = await prefilterWithEmbeddings(
+      config,
+      newFactText,
+      candidates
+    );
+    log(`Embedding pre-filter: ${candidates.length} → ${filteredCandidates.length} candidates`);
   }
 
-  // Fallback: simple text comparison
-  return checkWithTextSimilarity(newFactText, candidates);
+  // If no candidates pass embedding pre-filter, no supersedence
+  if (filteredCandidates.length === 0) {
+    return {
+      shouldSupersede: false,
+      supersededFactId: null,
+      reason: `${candidates.length} topic candidates, none passed embedding pre-filter (>0.75)`,
+    };
+  }
+
+  // Step 3 — LLM verification with Gemini Flash
+  try {
+    return await checkWithLlm(api, newFactText, filteredCandidates);
+  } catch (error) {
+    log(`LLM supersedence check failed: ${error}`);
+    // Fallback: use text similarity (old behavior for resilience)
+    return checkWithTextSimilarity(newFactText, filteredCandidates);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +127,7 @@ export async function checkSupersedence(
  * Finds active facts with the same owner and at least one common topic.
  *
  * The query is intentionally broad — fine filtering happens later
- * with semantic similarity.
+ * with embeddings + LLM.
  */
 function findCandidates(
   db: Database.Database,
@@ -125,27 +155,30 @@ function findCandidates(
 }
 
 // ---------------------------------------------------------------------------
-// Embedding-based verification
+// Embedding pre-filter
 // ---------------------------------------------------------------------------
 
 /**
- * Verifies supersedence using cosine similarity.
- * The fact with the highest similarity above the threshold gets superseded.
+ * Pre-filters candidates using embedding cosine similarity.
+ * Uses a broad threshold (0.75) — much lower than the old 0.92 —
+ * because the LLM will make the final decision.
+ *
+ * Returns the top 5 candidates sorted by similarity.
  */
-async function checkWithEmbedding(
+async function prefilterWithEmbeddings(
   config: PluginConfig,
   newFactText: string,
   candidates: Fact[]
-): Promise<SupersedeCheck> {
+): Promise<Fact[]> {
   let newEmbedding: number[];
   try {
     newEmbedding = await generateEmbedding(newFactText, config);
   } catch {
-    // If embedding fails, use text fallback
-    return checkWithTextSimilarity(newFactText, candidates);
+    // If embedding fails, return all candidates (let LLM decide)
+    return candidates;
   }
 
-  let bestMatch: { fact: Fact; score: number } | null = null;
+  const scored: { fact: Fact; score: number }[] = [];
 
   for (const candidate of candidates) {
     if (!candidate.embedding) continue;
@@ -154,32 +187,132 @@ async function checkWithEmbedding(
       const candidateEmbedding = deserializeEmbedding(candidate.embedding);
       const score = cosineSimilarity(newEmbedding, candidateEmbedding);
 
-      if (score > 0.92 && (!bestMatch || score > bestMatch.score)) {
-        // Keyword guard: skip if the distinctive nouns differ,
-        // BUT bypass the guard for very high similarity (>0.95) — these
-        // are almost certainly corrections/rewordings, not different topics
-        if (score < 0.95 && hasDistinctiveKeywordDifference(newFactText, candidate.text)) {
-          continue;
-        }
-        bestMatch = { fact: candidate, score };
+      if (score > 0.75) {
+        scored.push({ fact: candidate, score });
       }
     } catch {
       // Corrupted embedding, skip
     }
   }
 
-  if (bestMatch) {
-    return {
-      shouldSupersede: true,
-      supersededFactId: bestMatch.fact.id,
-      reason: `cosine similarity ${bestMatch.score.toFixed(3)} with "${bestMatch.fact.text.substring(0, 50)}..."`,
-    };
+  // Sort by similarity descending and take top 5
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, 5).map((s) => s.fact);
+}
+
+// ---------------------------------------------------------------------------
+// LLM-based verification (Gemini Flash)
+// ---------------------------------------------------------------------------
+
+/**
+ * Uses Gemini Flash to determine if the new fact supersedes any candidate.
+ *
+ * The LLM receives the new fact and a numbered list of candidates,
+ * and returns a structured JSON with its decision.
+ */
+async function checkWithLlm(
+  api: any,
+  newFactText: string,
+  candidates: Fact[]
+): Promise<SupersedeCheck> {
+  // Build the candidate list for the prompt
+  const candidateList = candidates
+    .map((f, i) => `  ${i + 1}. [ID: ${f.id}] "${f.text}"`)
+    .join("\n");
+
+  const prompt = `You are a fact supersedence checker for a memory system.
+
+## Task
+Determine if the NEW FACT replaces, corrects, or makes obsolete any of the EXISTING FACTS below.
+
+## NEW FACT
+"${newFactText}"
+
+## EXISTING FACTS (same owner/topic)
+${candidateList}
+
+## Rules
+- A fact is SUPERSEDED when the new fact:
+  - CORRECTS it (e.g. fixes a name, date, or detail)
+  - CONTRADICTS it (e.g. "likes X" → "doesn't like X anymore")
+  - UPDATES it (e.g. "lives in Rome" → "moved to Milan")
+  - Makes it REDUNDANT (e.g. the new fact contains all the info of the old one, plus more)
+- A fact is NOT superseded when:
+  - The two facts are about DIFFERENT things (even if the topic is the same)
+  - The old fact adds info that the new one doesn't cover
+  - They are COMPLEMENTARY, not contradictory
+
+## Response
+Respond with valid JSON only:
+{
+  "supersedes": true/false,
+  "superseded_id": "f_xxx" or null,
+  "reason": "brief explanation"
+}
+
+If multiple facts are superseded, pick the ONE most directly replaced.
+Respond ONLY with JSON, no markdown, no explanations.`;
+
+  log(`Calling Gemini for supersedence check: "${newFactText.substring(0, 60)}..." vs ${candidates.length} candidates`);
+
+  const response = await callLlmTask(api, prompt);
+  log(`Gemini supersedence response: ${response}`);
+
+  // Parse the response
+  let parsed: any;
+  try {
+    let cleaned = response.trim();
+    if (cleaned.startsWith("```")) {
+      cleaned = cleaned.replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
+    }
+    parsed = JSON.parse(cleaned);
+  } catch {
+    // Try to extract JSON
+    const jsonMatch = response.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch {
+        return {
+          shouldSupersede: false,
+          supersededFactId: null,
+          reason: "LLM response not parseable as JSON",
+        };
+      }
+    } else {
+      return {
+        shouldSupersede: false,
+        supersededFactId: null,
+        reason: "LLM response not parseable as JSON",
+      };
+    }
+  }
+
+  // Validate the superseded_id actually exists in our candidates
+  if (parsed.supersedes && parsed.superseded_id) {
+    const validCandidate = candidates.find(
+      (c) => c.id === parsed.superseded_id
+    );
+    if (validCandidate) {
+      return {
+        shouldSupersede: true,
+        supersededFactId: parsed.superseded_id,
+        reason: `LLM: ${parsed.reason || "supersedence confirmed"}`,
+      };
+    } else {
+      log(`LLM returned invalid superseded_id: ${parsed.superseded_id}`);
+      return {
+        shouldSupersede: false,
+        supersededFactId: null,
+        reason: `LLM returned invalid fact ID: ${parsed.superseded_id}`,
+      };
+    }
   }
 
   return {
     shouldSupersede: false,
     supersededFactId: null,
-    reason: `${candidates.length} candidates found but none above 0.92 threshold`,
+    reason: `LLM: ${parsed.reason || "no supersedence"}`,
   };
 }
 
@@ -189,7 +322,7 @@ async function checkWithEmbedding(
 
 /**
  * Verifies supersedence with a simple text comparison.
- * Used when the Ollama server is offline and embeddings are unavailable.
+ * Used when Gemini is unavailable (API key missing, network error, etc.).
  *
  * Compares keywords: if > 60% of substantive words match,
  * considers the fact as a potential supersedence.
@@ -215,7 +348,7 @@ function checkWithTextSimilarity(
     return {
       shouldSupersede: true,
       supersededFactId: bestMatch.fact.id,
-      reason: `word overlap ${(bestMatch.overlap * 100).toFixed(0)}% with "${bestMatch.fact.text.substring(0, 50)}..."`,
+      reason: `text fallback: word overlap ${(bestMatch.overlap * 100).toFixed(0)}% with "${bestMatch.fact.text.substring(0, 50)}..."`,
     };
   }
 

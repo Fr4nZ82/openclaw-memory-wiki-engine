@@ -64,6 +64,7 @@ export interface DreamReport {
  * Runs every 6 hours. Fast and lightweight.
  */
 export async function dreamLight(
+  api: any,
   db: Database.Database,
   config: PluginConfig,
   logger: any
@@ -101,7 +102,7 @@ export async function dreamLight(
   // Process each capture
   for (const capture of captures) {
     try {
-      await promoteCapture(db, config, capture, ollamaOnline, report, logger);
+      await promoteCapture(api, db, config, capture, ollamaOnline, report, logger);
     } catch (error) {
       const msg = `Error promoting capture #${capture.id}: ${error}`;
       logger.warn(`[Dream Light] ${msg}`);
@@ -139,7 +140,7 @@ export async function dreamRem(
   logger: any
 ): Promise<DreamReport> {
   // Phase 1: run light dream first
-  const report = await dreamLight(db, config, logger);
+  const report = await dreamLight(api, db, config, logger);
   report.type = "rem";
 
   logger.info("[Dream REM] Starting REM phase...");
@@ -200,6 +201,7 @@ export async function dreamRem(
  * 4. Mark the capture as promoted
  */
 async function promoteCapture(
+  api: any,
   db: Database.Database,
   config: PluginConfig,
   capture: SessionCapture,
@@ -251,6 +253,7 @@ async function promoteCapture(
 
   // Check supersedence
   const supersedeCheck = await checkSupersedence(
+    api,
     db,
     config,
     capture.fact_text,

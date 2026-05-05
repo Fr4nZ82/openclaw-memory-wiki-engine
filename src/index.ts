@@ -258,7 +258,7 @@ function register(api: any): void {
           try {
             const { dreamLight } = await import("./dream");
             // Run async without awaiting so we don't block the hook
-            dreamLight(database, config, ocLog).catch(e => {
+            dreamLight(api, database, config, ocLog).catch(e => {
               ocLog.error(`[Capture] Automatic Dream Light failed: ${e}`);
             });
           } catch (e) {
@@ -1006,7 +1006,7 @@ function register(api: any): void {
           
           return { text: "🌙 Deep REM avviato in background. Potrebbe volerci qualche minuto, ti avviserò al termine." };
         } else {
-          const report = await dreamLight(database, config, ocLog);
+          const report = await dreamLight(api, database, config, ocLog);
           return {
             text: [
               `🌙 Dream Light complete`,
@@ -1180,7 +1180,7 @@ function scheduleDreams(
   const intervalMs = config.dreamIntervalHours * 60 * 60 * 1000;
   dreamTimer = setInterval(async () => {
     try {
-      await dreamLight(db, config, log);
+      await dreamLight(api, db, config, log);
     } catch (error) {
       log.warn("[Dream] Error in scheduled light dream:", error);
     }
