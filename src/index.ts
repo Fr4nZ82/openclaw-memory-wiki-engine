@@ -144,20 +144,32 @@ function register(api: any): void {
 
   // -------------------------------------------------------------------
   // Strict dependency check: Ollama MUST be available
-  // We run this asynchronously but immediately on load. If it fails,
-  // we brutally kill the entire OpenClaw process.
+  // We run this asynchronously but immediately on load. If it fails
+  // after retries, we brutally kill the entire OpenClaw process.
+  // Retry logic: 3 attempts with 5s delay to tolerate transient
+  // network issues at gateway startup.
   // -------------------------------------------------------------------
-  import("./embedding").then(({ isOllamaAvailable }) => {
-    isOllamaAvailable(config!).then((ollamaOnline) => {
-      if (!ollamaOnline) {
-        ocLog.error(`[Memory Wiki Engine] 🛑 CRITICAL ERROR: Ollama server is unreachable at ${config!.embeddingUrl}`);
-        ocLog.error(`[Memory Wiki Engine] This plugin requires Ollama for vector embeddings. OpenClaw will now exit.`);
-        process.exit(1);
+  import("./embedding").then(async ({ isOllamaAvailable }) => {
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 5000;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const ollamaOnline = await isOllamaAvailable(config!);
+        if (ollamaOnline) {
+          dlog(`Ollama reachable at ${config!.embeddingUrl} (attempt ${attempt}/${MAX_RETRIES})`);
+          return; // success — exit check
+        }
+      } catch (err) {
+        dlog(`Ollama check attempt ${attempt}/${MAX_RETRIES} threw: ${err}`);
       }
-    }).catch(err => {
-      ocLog.error(`[Memory Wiki Engine] Failed to check Ollama availability:`, err);
-      process.exit(1);
-    });
+      if (attempt < MAX_RETRIES) {
+        ocLog.warn(`[Memory Wiki Engine] Ollama unreachable at ${config!.embeddingUrl} (attempt ${attempt}/${MAX_RETRIES}), retrying in ${RETRY_DELAY_MS / 1000}s...`);
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      }
+    }
+    ocLog.error(`[Memory Wiki Engine] 🛑 CRITICAL ERROR: Ollama server is unreachable at ${config!.embeddingUrl} after ${MAX_RETRIES} attempts`);
+    ocLog.error(`[Memory Wiki Engine] This plugin requires Ollama for vector embeddings. OpenClaw will now exit.`);
+    process.exit(1);
   });
 
   // -------------------------------------------------------------------
