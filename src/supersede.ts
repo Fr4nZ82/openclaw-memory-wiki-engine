@@ -155,8 +155,10 @@ async function checkWithEmbedding(
       const score = cosineSimilarity(newEmbedding, candidateEmbedding);
 
       if (score > 0.92 && (!bestMatch || score > bestMatch.score)) {
-        // Keyword guard: skip if the distinctive nouns differ
-        if (hasDistinctiveKeywordDifference(newFactText, candidate.text)) {
+        // Keyword guard: skip if the distinctive nouns differ,
+        // BUT bypass the guard for very high similarity (>0.95) — these
+        // are almost certainly corrections/rewordings, not different topics
+        if (score < 0.95 && hasDistinctiveKeywordDifference(newFactText, candidate.text)) {
           continue;
         }
         bestMatch = { fact: candidate, score };

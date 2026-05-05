@@ -363,7 +363,8 @@ async function deduplicateFacts(
 
         if (similarity > 0.92) {
           // Keyword guard: if the distinctive words differ, skip
-          if (hasDistinctiveKeywordDifference(facts[i].text, facts[j].text)) {
+          // BUT bypass for very high similarity (>0.95) — corrections/rewordings
+          if (similarity < 0.95 && hasDistinctiveKeywordDifference(facts[i].text, facts[j].text)) {
             if (config.debug) {
               logger.debug(
                 `[Dream REM] Dedup blocked by keyword guard: ` +
