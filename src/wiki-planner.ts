@@ -157,9 +157,9 @@ function buildFoundationPages(
 
     // Find members of this group
     const members = db.prepare(
-      "SELECT user_id FROM group_members WHERE group_id = ?"
-    ).all(g.id) as Array<{ user_id: string }>;
-    const memberSlugs = members.map(m => m.user_id.toLowerCase().replace(/[^a-z0-9]+/g, "_"));
+      "SELECT sender_id FROM group_members WHERE group_id = ?"
+    ).all(g.id) as Array<{ sender_id: string }>;
+    const memberSlugs = members.map(m => m.sender_id.toLowerCase().replace(/[^a-z0-9]+/g, "_"));
 
     pages[slug] = {
       slug,
