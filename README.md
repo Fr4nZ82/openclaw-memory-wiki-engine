@@ -219,7 +219,6 @@ All settings are optional — defaults work out of the box. Configure via `openc
 | `dreamRemTime` | `03:00` | Time for nightly deep dream (HH:MM) |
 | `minMessageLength` | `10` | Min chars to classify a message |
 | `maxMessageLength` | `2000` | Max chars sent to classifier |
-| `promptPatchesFile` | *(none)* | Path to a JSON file with declarative system prompt patches (see [Prompt Patcher](#prompt-patcher)) |
 
 > **Tip:** You can adjust the conversation history depth and classifier window directly from the OpenClaw CLI without editing the JSON file manually:
 > ```bash
@@ -286,35 +285,6 @@ Before each prompt, the plugin injects relevant context with 5 priority layers:
 4. **Session captures** — current session context
 
 Total budget is ~1100 tokens (configurable), distributed across layers with graceful truncation.
-
-### Prompt Patcher
-
-The plugin supports **declarative system prompt modification** via an external JSON file. This allows removing or replacing sections of the OpenClaw system prompt without code changes.
-
-Configure via `pluginConfig`:
-
-```json
-{
-  "promptPatchesFile": "~/.openclaw/workspace/.openclaw/prompt-patches.json"
-}
-```
-
-Patch file format:
-
-```json
-{
-  "remove": [
-    { "id": "self-update", "match": "## OpenClaw Self-Update", "type": "section" }
-  ],
-  "replace": [
-    { "id": "my-edit", "target": "old text", "replacement": "new text" }
-  ]
-}
-```
-
-- `remove` (type `section`): removes from `## Heading` to the next `## ` or end-of-prompt
-- `replace`: exact string substitution
-- If `promptPatchesFile` is not set, no patches are applied
 
 ### Multi-user architecture (Block-Level ACL)
 
