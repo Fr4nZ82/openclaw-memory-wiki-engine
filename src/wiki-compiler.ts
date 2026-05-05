@@ -245,6 +245,16 @@ Insert Obsidian-compatible [[wikilinks]] for known concepts and entities natural
 If old facts are contradicted by new ones, update the narrative.
 If a known entity is referred to by an alias, replace the alias with the canonical name using [[canonical_slug]].
 
+CRITICAL LANGUAGE INSTRUCTION:
+Write ALL wiki content in Italian (italiano). Title, description, body, and aliases must all be in Italian.
+
+CRITICAL DEDUPLICATION INSTRUCTION:
+If a concept or fact is already well-covered in a dedicated page (check the known slugs list), do NOT repeat it in full.
+Instead, write a brief mention with a [[wikilink]] to the authoritative page.
+Example: instead of re-explaining a person's work schedule in a concept page, write:
+"[[frodo]] segue orari di lavoro strutturati (vedi [[frodo]])."
+Full detail belongs on the most specific page; other pages should reference it briefly.
+
 CRITICAL CHRONOLOGY INSTRUCTION:
 Use specific dated episodes or future events ONLY as evidence to deduce skills, habits, roles, or relationships (e.g., "Tizen developer"). Summarize events in the past tense to provide historical context, but DO NOT turn the wiki into an appointment calendar. Do not include future dates or exact operational appointments in the final narrative.
 
@@ -285,7 +295,7 @@ ${factsList}
         const response = await callLlmTask(api, prompt, "wiki-merge", 120000);
         
         const parsed = parseJsonFromLlm(response, `semanticMergePage(${relativePath})`, logger);
-        if (parsed.mergedBody) mergedBody = parsed.mergedBody;
+        if (parsed.mergedBody) mergedBody = parsed.mergedBody.replace(/\\n/g, "\n");
         if (parsed.description) description = parsed.description;
         if (Array.isArray(parsed.aliases)) aliases = parsed.aliases;
         break; // Success
@@ -312,7 +322,7 @@ ${factsList}
   if (config.debug) logger.debug(`[Wiki Compiler] Generating frontmatter for ${targetEntity.title}`);
   
   // Generate Obsidian YAML Frontmatter
-  const tagsYaml = Array.from(tagsSet).map(t => `  - ${t}`).join("\n");
+  const tagsYaml = Array.from(tagsSet).map(t => `  - ${t.replace(/\s+/g, "_")}`).join("\n");
   const aliasesYaml = aliases.length > 0 ? "\n" + aliases.map(a => `  - "${a}"`).join("\n") : " []";
   const sourcesYaml = Array.from(sourcesSet).map(s => `  - "${s}"`).join("\n");
 
@@ -337,6 +347,225 @@ ${factsList}
     // Update shadow copy too
     fs.writeFileSync(shadowFilePath, content, "utf-8");
     logger.info(`[Wiki Compiler] ${relativePath} semantically merged`);
+    return true;
+  }
+
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Stadio 3: Il Cronista (Gemini Pro — cross-page aware compilation)
+// ---------------------------------------------------------------------------
+
+import type { PagePlan, CompilationPlan } from "./wiki-planner";
+
+/**
+ * Il Cronista — Writes a single wiki page using Gemini Pro.
+ * Has full awareness of the entire wiki structure through the CompilationPlan.
+ *
+ * @param plan - The full compilation plan (for cross-page context)
+ * @param slug - The page slug to compile
+ */
+export async function compilePage(
+  api: any,
+  db: Database.Database,
+  config: PluginConfig,
+  plan: CompilationPlan,
+  slug: string,
+  logger: any
+): Promise<boolean> {
+  const pagePlan = plan.pages[slug];
+  if (!pagePlan) {
+    logger.warn(`[Cronista] No plan found for page "${slug}", skipping`);
+    return false;
+  }
+
+  const PRO_MODEL = "gemini-3.1-pro-preview";
+
+  const fileName = `${slug}.md`;
+  const relativePath = path.join("pages", fileName);
+  const filePath = path.join(config.wikiPath, relativePath);
+  const shadowFilePath = getShadowPath(config, relativePath);
+
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.mkdirSync(path.dirname(shadowFilePath), { recursive: true });
+
+  // Preserve created date from existing file
+  const existingContent = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf-8") : "";
+  const now = new Date().toISOString().split("T")[0];
+  let createdDate = now;
+  if (existingContent) {
+    const match = existingContent.match(/^created:\s*(.+)$/m);
+    if (match) createdDate = match[1].trim();
+  }
+
+  // Build primary facts section
+  const primaryFactsText = pagePlan.primaryFacts.length > 0
+    ? pagePlan.primaryFacts.map(f => {
+        let line = `- [${f.factType.toUpperCase()}] ${f.text}`;
+        if (f.ownerType && f.ownerType !== "global") {
+          line += ` [ACL: type="${f.ownerType}" owner="${f.ownerId}" sender="${f.senderId}"]`;
+        }
+        return line;
+      }).join("\n")
+    : "(nessun fatto primario — scrivi solo una breve introduzione basata sul contesto strutturale)";
+
+  // Build referenced facts section
+  const referencedFactsText = pagePlan.referencedFacts.length > 0
+    ? pagePlan.referencedFacts.map(f =>
+        `- "${f.text.substring(0, 80)}${f.text.length > 80 ? "..." : ""}" → dettaglio in [[${f.primaryPage}]]`
+      ).join("\n")
+    : "(nessun fatto referenziato)";
+
+  // Build page index for wikilinks
+  const pageIndex = plan.compilationOrder
+    .filter(s => s !== slug)
+    .map(s => {
+      const p = plan.pages[s];
+      if (!p) return null;
+      return `- [[${s}]]: ${p.description || p.title}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  // Build recommended links
+  const recommendedLinks = (plan.linkGraph[slug] || [])
+    .map(l => `[[${l}]]`)
+    .join(", ");
+
+  // Load user aliases for wikilink normalization
+  let userAliasesText = "";
+  try {
+    const users = db.prepare("SELECT names FROM users").all() as Array<{names: string}>;
+    const aliasLines: string[] = [];
+    for (const u of users) {
+      const names = JSON.parse(u.names) as string[];
+      if (names.length > 1) {
+        const canonical = names[0];
+        const slug = canonical.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        aliasLines.push(`- ${names.slice(1).join(", ")} → usa [[${slug}]]`);
+      }
+    }
+    if (aliasLines.length > 0) {
+      userAliasesText = "\n\nALIAS UTENTI (normalizza al nome canonico):\n" + aliasLines.join("\n");
+    }
+  } catch {}
+
+  const prompt = `Sei il Cronista di una wiki personale. Stai scrivendo la pagina "${pagePlan.title}" (slug: ${slug}).
+
+LINGUA: Scrivi TUTTO in italiano. Titolo, descrizione, corpo, alias — tutto in italiano.
+
+FATTI PRIMARI (scrivi in dettaglio completo, sono il contenuto principale di questa pagina):
+${primaryFactsText}
+
+FATTI REFERENZIATI (menziona brevemente e linka alla pagina di dettaglio):
+${referencedFactsText}
+
+PAGINE NELLA WIKI (usa per i [[wikilinks]]):
+${pageIndex}
+
+LINK RACCOMANDATI per questa pagina: ${recommendedLinks || "nessuno specifico"}${userAliasesText}
+
+ISTRUZIONI DI STILE:
+- Scrivi prosa narrativa coesa, NON elenchi puntati
+- Inserisci [[wikilinks]] in modo naturale nel testo
+- Per i fatti referenziati, scrivi una breve menzione con link alla pagina di dettaglio
+- Non ripetere il dettaglio completo dei fatti referenziati — il lettore seguirà il link
+
+ISTRUZIONI ACL:
+Alcuni fatti hanno [ACL: type="..." owner="..." sender="..."].
+DEVI avvolgere le informazioni corrispondenti con tag HTML:
+<wikiauth type="user" owner="gollum" sender="frodo">Il testo riservato</wikiauth>
+I fatti pubblici (senza ACL) restano testo semplice.
+
+ISTRUZIONI CRONOLOGIA:
+Usa eventi datati SOLO come evidenza per dedurre competenze, abitudini o relazioni.
+NON trasformare la wiki in un calendario di appuntamenti.
+
+Rispondi con un JSON con questa struttura ESATTA:
+{
+  "mergedBody": "Il testo markdown completo con <wikiauth> e [[wikilinks]]",
+  "description": "Descrizione di 1-2 frasi della pagina",
+  "aliases": ["Nomi", "Alternativi", "Per", "Questo", "Argomento"]
+}
+
+IMPORTANTE: Il JSON deve essere valido. Esegui l'escape di virgolette (\\"  ) e newline (\\\\n) nelle stringhe.`;
+
+  let mergedBody = "";
+  let description = pagePlan.description || pagePlan.title;
+  let aliases: string[] = [];
+
+  let attempts = 0;
+  const maxAttempts = 2;
+  while (attempts < maxAttempts) {
+    try {
+      attempts++;
+      logger.info(`[Cronista] Writing "${pagePlan.title}" with Pro (attempt ${attempts}/${maxAttempts})...`);
+      const response = await callLlmTask(api, prompt, "cronista", 180000, PRO_MODEL);
+
+      const parsed = parseJsonFromLlm(response, `compilePage(${slug})`, logger);
+      if (parsed.mergedBody) mergedBody = parsed.mergedBody.replace(/\\n/g, "\n");
+      if (parsed.description) description = parsed.description;
+      if (Array.isArray(parsed.aliases)) aliases = parsed.aliases;
+      break;
+    } catch (e) {
+      if (attempts >= maxAttempts) {
+        logger.error(`[Cronista] Pro failed for "${slug}" after ${maxAttempts} attempts: ${e}`);
+        throw e;
+      } else {
+        logger.warn(`[Cronista] Pro failed for "${slug}" (attempt ${attempts}). Retrying...`);
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+  }
+
+  if (!mergedBody) {
+    throw new Error(`[Cronista] Failed to generate content for "${slug}"`);
+  }
+
+  // Build tags from primary facts topics + slug
+  const tagsSet = new Set<string>([slug]);
+  for (const f of pagePlan.primaryFacts) {
+    tagsSet.add(f.factType);
+    if (f.ownerType === "user") tagsSet.add(f.ownerId);
+  }
+  // Add linked page slugs as tags (light cross-referencing)
+  for (const link of (plan.linkGraph[slug] || []).slice(0, 5)) {
+    tagsSet.add(link);
+  }
+
+  const sourcesSet = new Set<string>();
+  for (const f of pagePlan.primaryFacts) {
+    if (f.senderId) sourcesSet.add(`sender:${f.senderId}`);
+  }
+
+  const hasMediumConfidence = false; // Could be computed from fact confidences
+
+  // Generate Obsidian YAML Frontmatter
+  const tagsYaml = Array.from(tagsSet).map(t => `  - ${t.replace(/\s+/g, "_")}`).join("\n");
+  const aliasesYaml = aliases.length > 0 ? "\n" + aliases.map(a => `  - "${a}"`).join("\n") : " []";
+  const sourcesYaml = Array.from(sourcesSet).map(s => `  - "${s}"`).join("\n");
+
+  const content = [
+    "---",
+    `title: "${pagePlan.title}"`,
+    `description: "${description.replace(/"/g, "'")}"`,
+    `created: ${createdDate}`,
+    `updated: ${now}`,
+    `aliases:${aliasesYaml}`,
+    `tags:\n${tagsYaml}`,
+    `confidence: ${hasMediumConfidence ? "medium" : "high"}`,
+    `sources:\n${sourcesYaml}`,
+    "---",
+    "",
+    mergedBody.trim(),
+    ""
+  ].join("\n");
+
+  if (existingContent !== content) {
+    fs.writeFileSync(filePath, content, "utf-8");
+    fs.writeFileSync(shadowFilePath, content, "utf-8");
+    logger.info(`[Cronista] ${relativePath} written (${pagePlan.primaryFacts.length} primary, ${pagePlan.referencedFacts.length} referenced)`);
     return true;
   }
 

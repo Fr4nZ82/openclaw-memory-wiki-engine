@@ -388,7 +388,8 @@ async function synthesizeWikiPages(
   // Find relevant pages for the topics
   const pageFiles = new Set<string>();
   for (const topic of topics) {
-    const pages = topicIndex[topic] ?? [];
+    const normalizedTopic = topic.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    const pages = topicIndex[normalizedTopic] ?? topicIndex[topic] ?? [];
     for (const page of pages) {
       pageFiles.add(page);
     }

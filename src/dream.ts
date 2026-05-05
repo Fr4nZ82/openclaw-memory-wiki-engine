@@ -33,6 +33,7 @@ import {
   deserializeEmbedding,
 } from "./embedding";
 import { checkSupersedence, executeSupersedence } from "./supersede";
+import type { CompilationPlan } from "./wiki-planner";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -159,11 +160,18 @@ export async function dreamRem(
     report.errors.push(`Decay: ${error}`);
   }
 
-  // Phase 4: wiki update
+  // Phase 4: Wiki update — La Forgia della Wiki (5 stadi)
   try {
-    report.wikiPagesUpdated = await updateWikiPages(api, db, config, logger);
+    report.wikiPagesUpdated = await forgeWiki(api, db, config, logger);
   } catch (error) {
-    report.errors.push(`Wiki update: ${error}`);
+    report.errors.push(`Wiki Forge: ${error}`);
+    logger.error(`[Dream REM] Wiki Forge failed, falling back to legacy: ${error}`);
+    // Fallback to legacy wiki update if the forge fails
+    try {
+      report.wikiPagesUpdated = await updateWikiPages(api, db, config, logger);
+    } catch (fallbackError) {
+      report.errors.push(`Wiki Legacy fallback: ${fallbackError}`);
+    }
   }
 
   // Phase 5 removed: MEMORY.md is deprecated in favor of the Wiki
@@ -435,7 +443,154 @@ function decayConfidence(db: Database.Database, logger: any): number {
 }
 
 // ---------------------------------------------------------------------------
-// Wiki update
+// Wiki update — La Forgia della Wiki
+// ---------------------------------------------------------------------------
+
+/**
+ * La Forgia della Wiki — 5-stage wiki compilation pipeline.
+ *
+ * Stages:
+ *   0. Il Fonditore  — Scaffold pages from USERS.md (deterministic)
+ *   1. Il Cartografo — Classify facts into pages (Gemini Flash)
+ *   2. L'Architetto  — Validate and optimize plan (deterministic)
+ *   3. Il Cronista   — Write pages with cross-page awareness (Gemini Pro)
+ *   4. Il Revisore   — Quality assurance (Gemini Pro)
+ */
+export async function forgeWiki(
+  api: any,
+  db: Database.Database,
+  config: PluginConfig,
+  logger: any
+): Promise<number> {
+  const { buildWikiPlan } = await import("./wiki-planner");
+  const { compilePage, syncHumanEdits } = await import("./wiki-compiler");
+  const { reviewWiki } = await import("./wiki-reviewer");
+
+  let pagesUpdated = 0;
+
+  // Sync human edits first (preserve manual changes)
+  try {
+    const edits = await syncHumanEdits(api, db, config, logger);
+    if (edits > 0) {
+      logger.info(`[Wiki Forge] Synced ${edits} human edits from wiki shadow copies`);
+    }
+  } catch (error) {
+    logger.error(`[Wiki Forge] Error syncing human edits: ${error}`);
+  }
+
+  // Stages 0-2: Build the compilation plan (Fonditore → Cartografo → Architetto)
+  logger.info("[Wiki Forge] ═══════════════════════════════════════════");
+  logger.info("[Wiki Forge] Starting La Forgia della Wiki (5 stages)");
+  logger.info("[Wiki Forge] ═══════════════════════════════════════════");
+
+  const plan = await buildWikiPlan(api, db, config, logger);
+
+  // Stage 3: Il Cronista — compile each page with Pro
+  logger.info("[Wiki Forge] === Stadio 3: Il Cronista ===");
+  for (const slug of plan.compilationOrder) {
+    try {
+      const updated = await compilePage(api, db, config, plan, slug, logger);
+      if (updated) pagesUpdated++;
+    } catch (e) {
+      logger.error(`[Wiki Forge] Failed to compile page "${slug}": ${e}`);
+    }
+  }
+
+  // Stage 4: Il Revisore — quality assurance (only if >5 pages compiled)
+  if (pagesUpdated > 5) {
+    logger.info("[Wiki Forge] === Stadio 4: Il Revisore ===");
+    try {
+      const review = await reviewWiki(api, db, config, plan, logger);
+      if (!review.ok) {
+        logger.warn(`[Wiki Forge] Reviewer found ${review.issues.length} issues: ${review.summary}`);
+      }
+    } catch (e) {
+      logger.warn(`[Wiki Forge] Reviewer failed (non-critical): ${e}`);
+    }
+  }
+
+  // Update topic index from the compilation plan
+  updateTopicIndexFromPlan(plan, config);
+
+  logger.info(`[Wiki Forge] ═══════════════════════════════════════════`);
+  logger.info(`[Wiki Forge] Complete: ${pagesUpdated}/${plan.compilationOrder.length} pages written`);
+  logger.info(`[Wiki Forge] ═══════════════════════════════════════════`);
+
+  return pagesUpdated;
+}
+
+/**
+ * Updates topic-index.json from the compilation plan.
+ * Maps topics → wiki pages based on fact assignments.
+ */
+function updateTopicIndexFromPlan(plan: CompilationPlan, config: PluginConfig): void {
+  const index: Record<string, string[]> = {};
+
+  for (const [slug, page] of Object.entries(plan.pages)) {
+    const pagePath = `pages/${slug}.md`;
+
+    // The page itself is indexed under its own slug
+    if (!index[slug]) index[slug] = [];
+    if (!index[slug].includes(pagePath)) index[slug].push(pagePath);
+
+    // Index from primary facts' topics
+    for (const f of page.primaryFacts) {
+      const ownerSlug = f.ownerId?.toLowerCase().replace(/[^a-z0-9]+/g, "_") || "";
+      if (ownerSlug && ownerSlug !== slug) {
+        if (!index[ownerSlug]) index[ownerSlug] = [];
+        if (!index[ownerSlug].includes(pagePath)) index[ownerSlug].push(pagePath);
+      }
+    }
+
+    // Index from linked pages
+    for (const link of (plan.linkGraph[slug] || [])) {
+      if (!index[link]) index[link] = [];
+      if (!index[link].includes(pagePath)) index[link].push(pagePath);
+    }
+  }
+
+  const indexPath = path.join(config.wikiPath, "_meta", "topic-index.json");
+  fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+  fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf-8");
+
+  // Generate index.md
+  const indexMdPath = path.join(config.wikiPath, "index.md");
+  const sortedTopics = Object.keys(plan.pages).sort();
+
+  const indexMdLines = [
+    "---",
+    "title: Indice Wiki",
+    "description: Indice generale della memoria di Samvise",
+    `updated: ${new Date().toISOString().split("T")[0]}`,
+    "---",
+    "# Indice della Memoria",
+    "",
+    "Questo indice è generato automaticamente da La Forgia della Wiki.",
+    "",
+    "## Persone",
+    "",
+    ...sortedTopics
+      .filter(s => plan.pages[s]?.pageType === "person")
+      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
+    "",
+    "## Gruppi",
+    "",
+    ...sortedTopics
+      .filter(s => plan.pages[s]?.pageType === "group_theme")
+      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
+    "",
+    "## Argomenti",
+    "",
+    ...sortedTopics
+      .filter(s => plan.pages[s]?.pageType === "concept")
+      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
+  ];
+
+  fs.writeFileSync(indexMdPath, indexMdLines.join("\n"), "utf-8");
+}
+
+// ---------------------------------------------------------------------------
+// Legacy Wiki update (fallback)
 // ---------------------------------------------------------------------------
 
 /**
@@ -580,14 +735,15 @@ function updateTopicIndex(
       const topic = rawTopic.toLowerCase();
       if (["general", "chat", "saluto", "sistema", "debug"].includes(topic)) continue;
 
-      const fileName = `${topic.replace(/[^a-z0-9]+/g, "_")}.md`;
+      const normalizedTopic = topic.replace(/[^a-z0-9]+/g, "_");
+      const fileName = `${normalizedTopic}.md`;
       const pagePath = `pages/${fileName}`;
 
-      const pages = index[topic] || [];
+      const pages = index[normalizedTopic] || [];
       if (!pages.includes(pagePath)) {
         pages.push(pagePath);
       }
-      index[topic] = pages;
+      index[normalizedTopic] = pages;
     }
   }
 

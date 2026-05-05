@@ -499,10 +499,10 @@ export async function wikiSync(
   config: PluginConfig,
   logger: any
 ): Promise<{ pagesUpdated: number; topicIndexUpdated: boolean }> {
-  const { updateWikiPages } = await import("./dream");
-  const pagesUpdated = await updateWikiPages(api, db, config, logger);
+  const { forgeWiki } = await import("./dream");
+  const pagesUpdated = await forgeWiki(api, db, config, logger);
   
-  logger.info(`[Wiki Sync] ${pagesUpdated} pages updated`);
+  logger.info(`[Wiki Sync] ${pagesUpdated} pages updated via Wiki Forge`);
   return { pagesUpdated, topicIndexUpdated: true };
 }
 

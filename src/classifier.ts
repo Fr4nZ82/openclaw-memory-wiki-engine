@@ -494,13 +494,12 @@ function writeClassifierAudit(prompt: string, model: string, response: string): 
  *
  * Uses the REST API with JSON response mode for fast, structured output.
  */
-export async function callLlmTask(api: any, prompt: string, callerLabel?: string, timeoutMs: number = 60000): Promise<string> {
+export async function callLlmTask(api: any, prompt: string, callerLabel?: string, timeoutMs: number = 60000, model: string = "gemini-3-flash-preview"): Promise<string> {
   const apiKey = await resolveGeminiApiKey(api);
   if (!apiKey) {
     throw new Error("No Gemini API key found (checked api.runtime.modelAuth, env, ~/.openclaw/.env)");
   }
 
-  const model = "gemini-3-flash-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   const MAX_RETRIES = 3;
