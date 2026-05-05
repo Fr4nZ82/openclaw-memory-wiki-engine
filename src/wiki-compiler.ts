@@ -234,6 +234,7 @@ export async function semanticMergePage(
     const prompt = `Rewrite the following wiki page by merging the new facts.
 DO NOT use bullet point lists if possible. Write a cohesive, narrative prose describing the entity/concept.
 Insert Obsidian-compatible [[wikilinks]] for known concepts and entities naturally in the text.
+If old facts are contradicted by new ones, update the narrative.
 If a known entity has aliases, use [[canonical_slug|alias]] format.
 
 CRITICAL CHRONOLOGY INSTRUCTION:
