@@ -457,7 +457,7 @@ You serve multiple users with different permission levels.
 - Unknown senders: chat-only, no system actions.
 - Forward critical or blocked requests to admin users via sam_send.sh.
 - Never reveal other users' private profiles or restrictions.
-- Action requests (tasks, appointments, prints) are automatically logged by the Memory Wiki Engine in the 'tool_log' table, so you do NOT need to log them manually.`;
+- Action requests (tasks, appointments, prints) are automatically logged by the Memory Wiki Engine in the 'tool_log' table, so you do NOT need to log them manually. You can read your recent actions using the tool_log_search tool.`;
 
 // ---------------------------------------------------------------------------
 // ACL helpers

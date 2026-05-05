@@ -300,24 +300,6 @@ export async function buildRecallContext(
       parts.push("## Current session captures\n" + truncated);
     }
   }
-
-  // -----------------------------------------------------------------
-  // 6. Recent tool logs (recent actions/tasks)
-  // -----------------------------------------------------------------
-  if (charBudget > 100) {
-    const toolLogs = getRecentToolLogs(db, sessionId);
-    if (toolLogs.length > 0) {
-      const logsText = toolLogs
-        .map((l) => `- ${l.timestamp}: ${l.action_text}`)
-        .join("\n");
-      const truncated =
-        logsText.length > charBudget
-          ? logsText.substring(0, charBudget) + "\n..."
-          : logsText;
-      parts.push("## Recent actions (audit trail)\n" + truncated);
-    }
-  }
-
   // -----------------------------------------------------------------
   // Assemble context
   // -----------------------------------------------------------------
@@ -350,6 +332,7 @@ function buildRoutingHints(): string {
 - **Appointments and calendar** → use the appropriate calendar skill
 - **Tasks and errands** → use the task management skill
 - **Photos and videos** → use the media cataloging skill
+- **Recent actions and tool audit trail** → use the tool_log_search tool to check what you recently did
 Memory below contains ONLY knowledge and context — not tasks or appointments.`;
 }
 
@@ -745,21 +728,4 @@ function getRecentCaptures(
        ORDER BY id DESC LIMIT 10`
     )
     .all(sessionId) as Array<{ fact_text: string }>;
-}
-
-/**
- * Gets recent tool logs (actions/tasks) for the current session.
- * This provides the agent with an audit trail of its recent actions.
- */
-function getRecentToolLogs(
-  db: Database.Database,
-  sessionId: string
-): Array<{ action_text: string; timestamp: string }> {
-  return db
-    .prepare(
-      `SELECT action_text, timestamp FROM tool_log
-       WHERE session_id = ?
-       ORDER BY id DESC LIMIT 5`
-    )
-    .all(sessionId) as Array<{ action_text: string; timestamp: string }>;
 }

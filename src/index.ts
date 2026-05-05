@@ -235,7 +235,7 @@ function register(api: any): void {
         if (pendingCount >= config.dreamCaptureThreshold * 2) {
           const { isOllamaAvailable } = await import("./embedding");
           const ollamaOnline = await isOllamaAvailable(config);
-          
+
           if (!ollamaOnline) {
             ocLog.warn(`[Capture] 🛑 KILL-SWITCH ACTIVATED: Memory overflow (${pendingCount} pending) and Ollama is OFFLINE. Capture blocked.`);
             // Inform the user if possible via generic text response using the SDK, though not guaranteed to halt Samwise's reasoning hook
@@ -243,7 +243,7 @@ function register(api: any): void {
               if (api.sendMessage) {
                 await api.sendMessage(event.from, "⚠️ [Memory Engine] Il mio sistema di memoria è in overflow e la torre GPU è irraggiungibile per la compressione. Non memorizzerò più nuovi fatti finché il problema non sarà risolto.");
               }
-            } catch (err) {}
+            } catch (err) { }
             return; // Abort capture pipeline completely
           }
         }
@@ -269,9 +269,9 @@ function register(api: any): void {
         if (stats.captured) {
           ocLog.info(
             `[Capture] ✅ "${message.text.substring(0, 40)}..." → ` +
-              `topics: [${stats.classification?.topics.join(", ")}], ` +
-              `type: ${stats.classification?.fact_type}, ` +
-              `owner: ${stats.classification?.owner_id}`
+            `topics: [${stats.classification?.topics.join(", ")}], ` +
+            `type: ${stats.classification?.fact_type}, ` +
+            `owner: ${stats.classification?.owner_id}`
           );
         } else if (stats.skipped_reason) {
           dlog(`[Capture] ⏭ "${message.text.substring(0, 30)}..." — ${stats.skipped_reason}`);
@@ -499,7 +499,7 @@ function register(api: any): void {
           if (foundMsgIdx === -1) { // only dump while searching
             const contentType = typeof msg.content === "string" ? "string"
               : Array.isArray(msg.content) ? `array[${msg.content.length}]`
-              : typeof msg.content;
+                : typeof msg.content;
             if (Array.isArray(msg.content)) {
               dlog(`  msg[${i}] role=user contentType=${contentType}:`);
               for (let p = 0; p < msg.content.length; p++) {
@@ -798,7 +798,7 @@ function register(api: any): void {
 
         if (Array.isArray(finalMessages) && finalMessages.length > keepMessages) {
           let candidateIndex = finalMessages.length - keepMessages;
-          
+
           // SAFE TRUNCATION: Gemini will throw 400 INVALID_ARGUMENT if we cut history in the
           // middle of a function_call / function_response pair, or if the history starts with
           // an orphaned model/tool message. We must walk BACKWARD until we find a CLEAN user message.
@@ -808,7 +808,7 @@ function register(api: any): void {
             const msg = finalMessages[candidateIndex];
             if (msg.role === "user") {
               // Check if it's a clean user message (no tool_result/functionResponse parts)
-              const hasToolResult = Array.isArray(msg.content) 
+              const hasToolResult = Array.isArray(msg.content)
                 ? msg.content.some((p: any) => p.type === "tool_result" || p.type === "functionResponse")
                 : false;
               if (!hasToolResult) {
@@ -878,11 +878,47 @@ function register(api: any): void {
       },
     });
 
-    // NOTE: `remember` tool removed (2026-04-28).
-    // The automatic classifier pipeline in message_received already captures
-    // all memorable facts with better quality (proper topics, group scope,
-    // Gemini-classified fact_type). The remember tool created duplicates that
-    // the dream had to supersede. Not required by the OpenClaw SDK.
+
+    // -------------------------------------------------------------------
+    // Tool: tool_log_search
+    // -------------------------------------------------------------------
+
+    api.registerTool({
+      name: "tool_log_search",
+      label: "Tool Log Search",
+      description:
+        "Search the audit trail of external tools and physical actions you have performed. " +
+        "Use this tool when the user asks 'Cosa hai appena fatto?', 'Hai acceso le luci?', " +
+        "or asks about recent commands you executed.",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "number",
+            description: "Number of recent actions to retrieve (default: 5, max: 20)",
+          },
+        },
+      },
+      async execute(_toolCallId: string, params: Record<string, unknown>) {
+        const database = getDb();
+        if (!database) return { content: [{ type: "text", text: "Memory not initialized" }] };
+
+        const limit = typeof params.limit === "number" ? Math.min(params.limit, 20) : 5;
+        const senderId = lastResolvedSender !== "unknown" ? lastResolvedSender : "unknown";
+        const sessionId = senderId !== "unknown" ? `telegram:${senderId}` : "unknown";
+
+        const logs = database.prepare(
+          `SELECT action_text, timestamp FROM tool_log WHERE session_id = ? ORDER BY id DESC LIMIT ?`
+        ).all(sessionId, limit) as Array<{ action_text: string; timestamp: string }>;
+
+        if (logs.length === 0) {
+          return { content: [{ type: "text", text: "Nessuna azione registrata di recente in questa sessione." }] };
+        }
+
+        const logsText = logs.map(l => `[${l.timestamp}] ${l.action_text}`).join("\n");
+        return { content: [{ type: "text", text: "Azioni recenti (più recenti prima):\n" + logsText }] };
+      },
+    });
 
     // -------------------------------------------------------------------
     // Tool: archive_search
@@ -980,7 +1016,7 @@ function register(api: any): void {
         if (!database || !config) return { text: "Plugin not initialized" };
 
         const type = ctx.args?.trim().toLowerCase() === "rem" ? "rem" : "light";
-        
+
         if (type === "rem") {
           // Esegue in background per non bloccare il polling di Telegram (può durare minuti)
           dreamRem(api, database, config, ocLog).then(report => {
@@ -995,15 +1031,15 @@ function register(api: any): void {
                 `- Wiki pages updated: ${report.wikiPagesUpdated}`,
                 report.errors.length > 0 ? `⚠️ Errors: ${report.errors.length}` : "",
               ].filter(Boolean).join("\n");
-              api.sendMessage(ctx.sessionKey, text).catch(() => {});
+              api.sendMessage(ctx.sessionKey, text).catch(() => { });
             }
           }).catch(e => {
             ocLog.error(`[Dream] Manual Dream REM failed: ${e}`);
             if (api.sendMessage && ctx.sessionKey) {
-              api.sendMessage(ctx.sessionKey, `⚠️ Error during Dream REM: ${e}`).catch(() => {});
+              api.sendMessage(ctx.sessionKey, `⚠️ Error during Dream REM: ${e}`).catch(() => { });
             }
           });
-          
+
           return { text: "🌙 Deep REM avviato in background. Potrebbe volerci qualche minuto, ti avviserò al termine." };
         } else {
           const report = await dreamLight(api, database, config, ocLog);
@@ -1192,7 +1228,7 @@ function scheduleDreams(
 
   log.info(
     `[Memory Wiki Engine] Dreams scheduled — light: every ${config.dreamIntervalHours}h, ` +
-      `REM: ${config.dreamRemTime}`
+    `REM: ${config.dreamRemTime}`
   );
 }
 
