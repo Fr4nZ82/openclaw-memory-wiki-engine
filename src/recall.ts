@@ -474,17 +474,17 @@ async function synthesizeWikiPages(
     return rawContext;
   }
 
-  const prompt = `Ecco la conversazione in corso (query utente):
+  const prompt = `Here is the ongoing conversation (user query):
 """
 ${userQuery}
 """
 
-Ecco i documenti di riferimento dalla Wiki:
+Here are the reference documents from the Wiki:
 """
 ${rawContext.substring(0, 10000)}
 """
 
-Estrai unicamente in un breve paragrafo in prosa discorsiva i concetti utili per rispondere. Non inventare nulla.`;
+Extract only the relevant concepts useful for answering, in a brief discursive prose paragraph. Do not invent anything.`;
 
   try {
     let response: string;

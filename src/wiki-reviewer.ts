@@ -62,34 +62,34 @@ export async function reviewWiki(
     return `| ${slug} | ${p.pageType} | ${p.description || p.title} | ${primaryCount} | ${referencedCount} | ${links} |`;
   }).filter(Boolean).join("\n");
 
-  const prompt = `Sei il Revisore di qualità di una wiki personale appena generata.
-Verifica la struttura e segnala problemi.
+  const prompt = `You are the Quality Reviewer of a personal wiki that was just generated.
+Verify the structure and report any issues.
 
-INDICE DELLA WIKI:
-| Pagina | Tipo | Descrizione | Fatti primari | Fatti referenziati | Link |
-|--------|------|-------------|--------------|-------------------|------|
+WIKI INDEX:
+| Page | Type | Description | Primary facts | Referenced facts | Links |
+|------|------|-------------|--------------|-----------------|-------|
 ${pageRows}
 
-PAGINE UNITE (merge eseguiti):
-${plan.mergedPages.length > 0 ? plan.mergedPages.map(m => `- "${m.from}" → fusa in "${m.into}" (${m.reason})`).join("\n") : "Nessun merge eseguito."}
+MERGED PAGES (merges performed):
+${plan.mergedPages.length > 0 ? plan.mergedPages.map(m => `- "${m.from}" → merged into "${m.into}" (${m.reason})`).join("\n") : "No merges performed."}
 
-VERIFICA:
-1. Ci sono pagine con 0 fatti primari E 0 fatti referenziati? (pagine vuote)
-2. Ci sono pagine che dovrebbero avere link bidirezionali ma non li hanno?
-3. Ci sono pagine persona senza link ad altre pagine persona della stessa famiglia?
-4. C'è un concetto che compare come primario in 3+ pagine? (duplicazione residua)
-5. Il numero totale di fatti (${plan.factCount}) è coerente con la distribuzione?
+CHECKS:
+1. Are there pages with 0 primary facts AND 0 referenced facts? (empty pages)
+2. Are there pages that should have bidirectional links but don't?
+3. Are there person pages without links to other person pages in the same family?
+4. Is there a concept that appears as primary in 3+ pages? (residual duplication)
+5. Is the total fact count (${plan.factCount}) consistent with the distribution?
 
-Rispondi con un JSON:
+Respond with a JSON:
 {
   "ok": true/false,
   "issues": [
-    { "severity": "warning", "page": "slug", "message": "descrizione problema", "suggestion": "suggerimento fix" }
+    { "severity": "warning", "page": "slug", "message": "problem description", "suggestion": "suggested fix" }
   ],
-  "summary": "Riassunto di 1-2 frasi della qualità della wiki"
+  "summary": "1-2 sentence summary of wiki quality"
 }
 
-Se non ci sono problemi, rispondi con ok: true e issues vuoto.`;
+If there are no issues, respond with ok: true and empty issues.`;
 
   try {
     logger.info(`[Revisore] Reviewing wiki structure (${plan.compilationOrder.length} pages)...`);

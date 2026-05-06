@@ -571,19 +571,19 @@ function updateTopicIndexFromPlan(plan: CompilationPlan, config: PluginConfig): 
     "",
     ...sortedTopics
       .filter(s => plan.pages[s]?.pageType === "person")
-      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
+      .map(s => `- [[pages/${s}|${plan.pages[s].title}]]`),
     "",
     "## Gruppi",
     "",
     ...sortedTopics
       .filter(s => plan.pages[s]?.pageType === "group_theme")
-      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
+      .map(s => `- [[pages/${s}|${plan.pages[s].title}]]`),
     "",
     "## Argomenti",
     "",
     ...sortedTopics
       .filter(s => plan.pages[s]?.pageType === "concept")
-      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
+      .map(s => `- [[pages/${s}|${plan.pages[s].title}]]`),
   ];
 
   fs.writeFileSync(indexMdPath, indexMdLines.join("\n"), "utf-8");
@@ -772,7 +772,7 @@ function updateTopicIndex(
   for (const topic of sortedTopics) {
     const slug = topic.replace(/[^a-z0-9]+/g, "_");
     const title = topic.charAt(0).toUpperCase() + topic.slice(1);
-    indexMdLines.push(`- [[${slug}|${title}]]`);
+    indexMdLines.push(`- [[pages/${slug}|${title}]]`);
   }
   
   fs.writeFileSync(indexMdPath, indexMdLines.join("\n"), "utf-8");

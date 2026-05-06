@@ -21,14 +21,14 @@ function getShadowPath(config: PluginConfig, relativePath: string): string {
 // Helper per parsi sicuro
 function parseJsonFromLlm(response: any, component: string, logger: any): any {
   if (typeof response !== "string") return response;
-  
+
   let cleaned = response.trim();
   if (cleaned.startsWith("```json")) {
     cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
   } else if (cleaned.startsWith("```")) {
     cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
   }
-  
+
   try {
     return JSON.parse(cleaned);
   } catch (err) {
@@ -48,7 +48,7 @@ export async function syncHumanEdits(
   if (!fs.existsSync(shadowBase)) fs.mkdirSync(shadowBase, { recursive: true });
 
   const subDirs = ["pages"];
-  
+
   for (const dir of subDirs) {
     const dirPath = path.join(config.wikiPath, dir);
     if (!fs.existsSync(dirPath)) continue;
@@ -120,10 +120,10 @@ ${newContent.substring(0, 4000)}
     const facts = parseJsonFromLlm(response, "extractDelta", logger);
     if (Array.isArray(facts) && facts.length > 0) {
       const { topicsToJson } = await import("./utils");
-      
+
       for (const fact of facts) {
         if (!fact.text) continue;
-        
+
         // Save as capture so the Dream Engine will natively handle supersedence and embedding
         db.prepare(
           `INSERT INTO session_captures
@@ -177,7 +177,7 @@ export async function semanticMergePage(
     if (match) {
       createdDate = match[1].trim();
     } else {
-      try { createdDate = fs.statSync(filePath).birthtime.toISOString().split("T")[0]; } catch(e) {}
+      try { createdDate = fs.statSync(filePath).birthtime.toISOString().split("T")[0]; } catch (e) { }
     }
   }
 
@@ -190,7 +190,7 @@ export async function semanticMergePage(
     try {
       const ts = JSON.parse(f.topics);
       if (Array.isArray(ts)) ts.forEach((t: string) => tagsSet.add(t.toLowerCase()));
-    } catch {}
+    } catch { }
     if (f.sender_id) sourcesSet.add(`sender:${f.sender_id}`);
     if (f.confidence < 0.8) hasMediumConfidence = true;
 
@@ -212,24 +212,24 @@ export async function semanticMergePage(
     try {
       const files = fs.readdirSync(path.join(config.wikiPath, "pages"));
       knownSlugs.push(...files.filter(f => f.endsWith(".md")).map(f => f.replace(".md", "")));
-    } catch {}
+    } catch { }
 
     let userAliasesText = "";
     try {
-      const users = db.prepare("SELECT names FROM users").all() as Array<{names: string}>;
+      const users = db.prepare("SELECT names FROM users").all() as Array<{ names: string }>;
       const aliasesMap: string[] = [];
       for (const u of users) {
         const names = JSON.parse(u.names) as string[];
         if (names.length > 0) {
-           const canonical = names[0];
-           const canonicalSlug = canonical.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-           const otherNames = names.slice(1);
-           if (otherNames.length > 0) {
-             aliasesMap.push(`- Canonical slug: ${canonicalSlug} (Aliases: ${otherNames.join(", ")}). Replace the alias with the canonical name and use [[${canonicalSlug}]]`);
-           } else {
-             aliasesMap.push(`- Canonical slug: ${canonicalSlug}`);
-           }
-           if (!knownSlugs.includes(canonicalSlug)) knownSlugs.push(canonicalSlug);
+          const canonical = names[0];
+          const canonicalSlug = canonical.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+          const otherNames = names.slice(1);
+          if (otherNames.length > 0) {
+            aliasesMap.push(`- Canonical slug: ${canonicalSlug} (Aliases: ${otherNames.join(", ")}). Replace the alias with the canonical name and use [[${canonicalSlug}]]`);
+          } else {
+            aliasesMap.push(`- Canonical slug: ${canonicalSlug}`);
+          }
+          if (!knownSlugs.includes(canonicalSlug)) knownSlugs.push(canonicalSlug);
         }
       }
       if (aliasesMap.length > 0) {
@@ -293,7 +293,7 @@ ${factsList}
         attempts++;
         if (config.debug) logger.debug(`[Wiki Compiler] Requesting semantic merge for ${targetEntity.title} from LLM (Attempt ${attempts}/${maxAttempts})...`);
         const response = await callLlmTask(api, prompt, "wiki-merge", 120000);
-        
+
         const parsed = parseJsonFromLlm(response, `semanticMergePage(${relativePath})`, logger);
         if (parsed.mergedBody) mergedBody = parsed.mergedBody.replace(/\\n/g, "\n");
         if (parsed.description) description = parsed.description;
@@ -310,8 +310,8 @@ ${factsList}
       }
     }
   } catch (e) {
-      logger.error(`[Wiki Compiler] Directory read failed: ${e}`);
-      throw e;
+    logger.error(`[Wiki Compiler] Directory read failed: ${e}`);
+    throw e;
   }
 
   // Strict enforcement: LLM must succeed
@@ -320,7 +320,7 @@ ${factsList}
   }
 
   if (config.debug) logger.debug(`[Wiki Compiler] Generating frontmatter for ${targetEntity.title}`);
-  
+
   // Generate Obsidian YAML Frontmatter
   const tagsYaml = Array.from(tagsSet).map(t => `  - ${t.replace(/\s+/g, "_")}`).join("\n");
   const aliasesYaml = aliases.length > 0 ? "\n" + aliases.map(a => `  - "${a}"`).join("\n") : " []";
@@ -402,20 +402,20 @@ export async function compilePage(
   // Build primary facts section
   const primaryFactsText = pagePlan.primaryFacts.length > 0
     ? pagePlan.primaryFacts.map(f => {
-        let line = `- [${f.factType.toUpperCase()}] ${f.text}`;
-        if (f.ownerType && f.ownerType !== "global") {
-          line += ` [ACL: type="${f.ownerType}" owner="${f.ownerId}" sender="${f.senderId}"]`;
-        }
-        return line;
-      }).join("\n")
-    : "(nessun fatto primario — scrivi solo una breve introduzione basata sul contesto strutturale)";
+      let line = `- [${f.factType.toUpperCase()}] ${f.text}`;
+      if (f.ownerType && f.ownerType !== "global") {
+        line += ` [ACL: type="${f.ownerType}" owner="${f.ownerId}" sender="${f.senderId}"]`;
+      }
+      return line;
+    }).join("\n")
+    : "(no primary facts — write only a brief introduction based on structural context)";
 
   // Build referenced facts section
   const referencedFactsText = pagePlan.referencedFacts.length > 0
     ? pagePlan.referencedFacts.map(f =>
-        `- "${f.text.substring(0, 80)}${f.text.length > 80 ? "..." : ""}" → dettaglio in [[${f.primaryPage}]]`
-      ).join("\n")
-    : "(nessun fatto referenziato)";
+      `- "${f.text.substring(0, 80)}${f.text.length > 80 ? "..." : ""}" → detail in [[${f.primaryPage}]]`
+    ).join("\n")
+    : "(no referenced facts)";
 
   // Build page index for wikilinks
   const pageIndex = plan.compilationOrder
@@ -436,7 +436,7 @@ export async function compilePage(
   // Load user aliases for wikilink normalization
   let userAliasesText = "";
   try {
-    const users = db.prepare("SELECT names FROM users").all() as Array<{names: string}>;
+    const users = db.prepare("SELECT names FROM users").all() as Array<{ names: string }>;
     const aliasLines: string[] = [];
     for (const u of users) {
       const names = JSON.parse(u.names) as string[];
@@ -447,57 +447,53 @@ export async function compilePage(
       }
     }
     if (aliasLines.length > 0) {
-      userAliasesText = "\n\nALIAS UTENTI (normalizza al nome canonico):\n" + aliasLines.join("\n");
+      userAliasesText = "\n\nUSER ALIASES (normalize to canonical name):\n" + aliasLines.join("\n");
     }
-  } catch {}
+  } catch { }
 
-  const prompt = `Sei il Cronista di una wiki personale. Stai scrivendo la pagina "${pagePlan.title}" (slug: ${slug}).
+  const prompt = `You are the Chronicler of a personal wiki. You are writing the page "${pagePlan.title}" (slug: ${slug}).
 
-LINGUA: Scrivi TUTTO in italiano. Titolo, descrizione, corpo, alias — tutto in italiano.
+LANGUAGE: Write ALL output in Italian. Title, description, body, aliases — everything in Italian.
 
-FATTI PRIMARI (scrivi in dettaglio completo, sono il contenuto principale di questa pagina):
+PRIMARY FACTS (write in full detail, these are the main content of this page):
 ${primaryFactsText}
 
-FATTI REFERENZIATI (menziona brevemente e linka alla pagina di dettaglio):
+REFERENCED FACTS (mention briefly and link to the detail page):
 ${referencedFactsText}
 
-PAGINE NELLA WIKI (usa per i [[wikilinks]]):
+PAGES IN THE WIKI (use for [[wikilinks]]):
 ${pageIndex}
 
-LINK RACCOMANDATI per questa pagina: ${recommendedLinks || "nessuno specifico"}${userAliasesText}
+RECOMMENDED LINKS for this page: ${recommendedLinks || "none specific"}${userAliasesText}
 
-ISTRUZIONI DI STILE:
-- Scrivi prosa narrativa coesa, NON elenchi puntati
-- Inserisci [[wikilinks]] in modo naturale nel testo
-- Per i fatti referenziati, scrivi una breve menzione con link alla pagina di dettaglio
-- Non ripetere il dettaglio completo dei fatti referenziati — il lettore seguirà il link
+STYLE RULES:
+- Write cohesive narrative prose, NOT bullet lists
+- Insert [[wikilinks]] naturally in the text
+- For referenced facts, write a brief mention with a link to the detail page
+- Do NOT repeat the full detail of referenced facts — the reader will follow the link
 
-REGOLA ANTI-RIDONDANZA (CRITICA):
-Quando menzioni una persona o un concetto che ha la propria pagina wiki, usa SOLO il [[wikilink]].
-NON duplicare informazioni che appartengono all'altra pagina.
-SBAGLIATO: "Francesco ([[frodo]]), la cui data di nascita è il 19 aprile 1982, come dettagliato nella sua pagina personale."
-CORRETTO: "Francesco ([[frodo]]), suo compagno."
-Il compleanno di Francesco appartiene alla pagina [[frodo]], non va ripetuto qui.
-Ogni dato deve apparire UNA SOLA VOLTA nell'intera wiki, nella sua pagina primaria.
+ANTI-REDUNDANCY RULE (CRITICAL):
+When mentioning a person or concept that has its own wiki page, use ONLY the [[wikilink]].
+DO NOT duplicate information that belongs to the other page.
 
-ISTRUZIONI ACL:
-Alcuni fatti hanno [ACL: type="..." owner="..." sender="..."].
-DEVI avvolgere le informazioni corrispondenti con tag HTML:
-<wikiauth type="user" owner="gollum" sender="frodo">Il testo riservato</wikiauth>
-I fatti pubblici (senza ACL) restano testo semplice.
+ACL RULES:
+Some facts have [ACL: type="..." owner="..." sender="..."].
+You MUST wrap the corresponding information with HTML tags:
+<wikiauth type="user" owner="gollum" sender="frodo">The restricted text</wikiauth>
+Public facts (without ACL) remain plain text.
 
-ISTRUZIONI CRONOLOGIA:
-Usa eventi datati SOLO come evidenza per dedurre competenze, abitudini o relazioni.
-NON trasformare la wiki in un calendario di appuntamenti.
+CHRONOLOGY RULES:
+Use dated events ONLY as evidence to deduce skills, habits, or relationships.
+Do NOT turn the wiki into an appointment calendar.
 
-Rispondi con un JSON con questa struttura ESATTA:
+Respond with a JSON with this EXACT structure:
 {
-  "mergedBody": "Il testo markdown completo con <wikiauth> e [[wikilinks]]",
-  "description": "Descrizione di 1-2 frasi della pagina",
-  "aliases": ["Nomi", "Alternativi", "Per", "Questo", "Argomento"]
+  "mergedBody": "The complete markdown text with <wikiauth> and [[wikilinks]]",
+  "description": "1-2 sentence description of the page",
+  "aliases": ["Alternative", "Names", "For", "This", "Topic"]
 }
 
-IMPORTANTE: Il JSON deve essere valido. Esegui l'escape di virgolette (\\"  ) e newline (\\\\n) nelle stringhe.`;
+IMPORTANT: The JSON must be valid. Escape quotes (\\"  ) and newlines (\\\\n) in strings.`;
 
   let mergedBody = "";
   let description = pagePlan.description || pagePlan.title;

@@ -213,33 +213,33 @@ async function classifyFacts(
     return `[id:${f.id}] "${f.text}" topics=[${topics}] owner_type=${f.owner_type} owner_id=${f.owner_id}`;
   }).join("\n");
 
-  const prompt = `Sei il Cartografo di una wiki personale. Devi organizzare ${allFacts.length} fatti in pagine.
+  const prompt = `You are the Cartographer of a personal wiki. You must organize ${allFacts.length} facts into pages.
 
-PAGINE GIÀ ESISTENTI (fondazione, NON eliminabili):
+EXISTING PAGES (foundation, NOT deletable):
 ${foundationDesc}
 
-REGOLE DI ASSEGNAZIONE:
-1. Fatto con owner_type="user" (bio, preferenza, abitudine personale)
-   → primary_page = pagina della PERSONA (già esistente)
-   → referenced_pages = max 1-2 pagine tematiche correlate
+ASSIGNMENT RULES:
+1. Fact with owner_type="user" (bio, preference, personal habit)
+   → primary_page = the PERSON's page (already exists)
+   → referenced_pages = max 1-2 related thematic pages
 
-2. Fatto con owner_type="group" (rientra nello scope del gruppo)
-   → primary_page = pagina TEMATICA più adatta
-   → Se non esiste una pagina tematica adatta, CREANE UNA NUOVA (inventa un slug in italiano, senza spazi, usa underscore)
-   → referenced_pages = pagine delle PERSONE coinvolte
+2. Fact with owner_type="group" (falls within the group's scope)
+   → primary_page = the most suitable THEMATIC page
+   → If no suitable thematic page exists, CREATE A NEW ONE (invent a slug in Italian, no spaces, use underscores)
+   → referenced_pages = pages of the PEOPLE involved
 
-3. Fatto con owner_type="global" o senza owner specifico
-   → primary_page = la pagina tematica più adatta
-   → Se il fatto riguarda chiaramente una persona, usa quella persona come primary
+3. Fact with owner_type="global" or no specific owner
+   → primary_page = the most suitable thematic page
+   → If the fact clearly concerns a person, use that person as primary
 
-4. Ogni fatto ha ESATTAMENTE 1 primary_page
-5. referenced_pages: max 1-2 pagine dove il fatto è rilevante ma secondario
-6. I nomi delle nuove pagine devono essere in italiano, senza spazi (usa underscore)
+4. Each fact has EXACTLY 1 primary_page
+5. referenced_pages: max 1-2 pages where the fact is relevant but secondary
+6. Names of new pages must be in Italian, no spaces (use underscores)
 
-FATTI DA CLASSIFICARE:
+FACTS TO CLASSIFY:
 ${factLines}
 
-Rispondi con un JSON con questa struttura ESATTA:
+Respond with a JSON with this EXACT structure:
 {
   "assignments": [
     { "fact_id": 1, "primary_page": "frodo", "referenced_pages": ["lavoro"] },
