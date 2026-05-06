@@ -144,9 +144,9 @@ export async function processUserMessage(
     return stats;
   }
 
-  // Step 2 — Classify the message
+  // Step 2 — Classify the message (returns array of extractions)
   log(`classifying message...`);
-  const classification = await classifyMessage(
+  const classifications = await classifyMessage(
     api,
     db,
     config,
@@ -159,42 +159,56 @@ export async function processUserMessage(
     message.session_id
   );
   stats.classified = true;
-  stats.classification = classification;
-  log(`classified: memorable=${classification.is_memorable}, task=${classification.is_task}, type=${classification.fact_type}, topics=${JSON.stringify(classification.topics)}`);
+  // Keep the first classification for backward-compatible stats
+  stats.classification = classifications[0] || null;
+  log(`classified: ${classifications.length} extractions`);
 
-  // Step 3 — Evaluate whether to capture
+  // Step 3 — Evaluate and capture each extraction
+  let captureCount = 0;
 
-  // 3a. Tasks and appointments → skills handle these, we skip
-  // But we still log them to the tool_log
-  if (classification.is_task) {
-    log(`SAVING TOOL LOG: action="${message.text.substring(0, 50)}", sender=${message.sender_id}`);
-    saveToolLog(db, message);
-    
+  for (const classification of classifications) {
+    // 3a. Tasks and appointments → skills handle these, we skip
+    // But we still log them to the tool_log (once, on first task hit)
+    if (classification.is_task && captureCount === 0) {
+      log(`SAVING TOOL LOG: action="${message.text.substring(0, 50)}", sender=${message.sender_id}`);
+      saveToolLog(db, message);
+    }
+
+    // 3b. Not memorable → skip this extraction
     if (!classification.is_memorable) {
+      log(`skipped extraction: not memorable`);
+      continue;
+    }
+
+    // 3c. Empty fact_text → skip
+    if (!classification.fact_text) {
+      log(`skipped extraction: empty fact_text`);
+      continue;
+    }
+
+    // 3d. is_task only (no fact alongside) → skip capture
+    if (classification.is_task && !classification.is_memorable) {
+      continue;
+    }
+
+    // Step 4 — Save to captures
+    log(`SAVING CAPTURE ${captureCount + 1}: fact="${classification.fact_text}", owner=${classification.owner_id}, type=${classification.fact_type}`);
+    saveCapture(db, message, classification);
+    captureCount++;
+  }
+
+  if (captureCount > 0) {
+    stats.captured = true;
+    log(`total captures saved: ${captureCount}`);
+  } else if (!stats.captured) {
+    // Determine skip reason from the first classification
+    const first = classifications[0];
+    if (first?.is_task && !first?.is_memorable) {
       stats.skipped_reason = "is_task (handled by skills)";
-      log(`skipped: is_task`);
-      return stats;
+    } else {
+      stats.skipped_reason = "not memorable";
     }
   }
-
-  // 3b. Not memorable → skip
-  if (!classification.is_memorable) {
-    stats.skipped_reason = "not memorable";
-    log(`skipped: not memorable`);
-    return stats;
-  }
-
-  // 3c. Empty fact_text → skip (classifier didn't extract anything)
-  if (!classification.fact_text) {
-    stats.skipped_reason = "empty fact_text";
-    log(`skipped: empty fact_text (classifier returned memorable=true but no text)`);
-    return stats;
-  }
-
-  // Step 4 — Save to captures
-  log(`SAVING CAPTURE: fact="${classification.fact_text}", owner=${classification.owner_id}, type=${classification.fact_type}`);
-  saveCapture(db, message, classification);
-  stats.captured = true;
 
   return stats;
 }

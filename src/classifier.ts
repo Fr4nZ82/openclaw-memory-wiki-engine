@@ -135,7 +135,7 @@ function buildClassifierPrompt(
     .join("\n");
 
   return `You are a message classifier for a multi-user AI assistant.
-Your task is to analyze ONE message and decide if it contains information worth remembering.
+Your task is to analyze ONE message and extract ALL distinct facts worth remembering.
 
 ## Conversation context (recent messages)
 ${windowText || "(no previous context)"}
@@ -157,17 +157,21 @@ ${messageTimestamp}
 
 ## Instructions
 
-Analyze the message and respond with valid JSON:
+Analyze the message and respond with valid JSON.
+A single message may contain MULTIPLE distinct facts. Extract each one separately.
 
 {
   "topics": ["topic1", "topic2"],
   "is_task": false,
   "is_internal": false,
-  "is_memorable": true,
-  "fact_text": "the extracted fact with resolved dates",
-  "fact_type": "preference",
-  "owner_type": "user",
-  "owner_id": "username"
+  "extractions": [
+    {
+      "fact_text": "the extracted fact with resolved dates",
+      "fact_type": "bio",
+      "owner_type": "user",
+      "owner_id": "username"
+    }
+  ]
 }
 
 ### Rules
@@ -182,10 +186,19 @@ Analyze the message and respond with valid JSON:
 3. **is_internal**: true if the message is about the system itself, debug, config,
    technical errors, agents, pipeline, deployment.
 
-4. **is_memorable**: true if the message contains a FACT worth remembering.
-   Not memorable: greetings, thanks, pure questions, generic help requests.
-   A message can be is_task=true AND is_memorable=true if it contains
+4. **extractions**: an array of ALL distinct facts from the message.
+   Each extraction is an independent piece of information.
+   If the message is not memorable, return an EMPTY array [].
+   If the message contains 1 fact, return an array with 1 element.
+   If the message contains 3 facts, return 3 elements.
+
+   Not memorable (empty array): greetings, thanks, pure questions, generic help requests.
+   A message can be is_task=true AND still have extractions if it contains
    both an action and a fact (rare — when in doubt, choose is_task only).
+
+   SPLIT RULE: Each extraction must be ONE atomic fact. If a message says
+   "Jenny is pregnant, tomorrow we go to Pantalla, Daniel is getting a sister",
+   that's 3 separate facts, not 1.
 
 5. **fact_text**: the extracted fact, rephrased in third person, clean.
    IMPORTANT: write the fact in the SAME LANGUAGE as the original message.
@@ -195,7 +208,7 @@ Analyze the message and respond with valid JSON:
    "tomorrow" → concrete date. "last Saturday" → concrete date.
    "last week" → concrete date.
 
-6. **fact_type**:
+6. **fact_type** (per extraction):
    - fact: general objective information.
    - bio: biographical data, interpersonal relationships, personal history.
    - preference: tastes, likes, dislikes.
@@ -204,9 +217,9 @@ Analyze the message and respond with valid JSON:
    - plan: future intentions, scheduled events, upcoming trips or meetings (FUTURE).
    - internal: technical notes, debug info, system status (ONLY if the message is technical).
 
-If fact_type is "internal", is_internal MUST be true.
+   If fact_type is "internal", is_internal MUST be true.
 
-7. **owner_type and owner_id**: who OWNS the fact (not who says it).
+7. **owner_type and owner_id** (per extraction): who OWNS the fact (not who says it).
    First, check if the fact aligns with the explicitly declared "Scope" of any of the User's groups:
    - If YES → owner_type: "group", owner_id: "<the matching group_id>"
    - If NO (the fact is strictly personal, regardless of who it is about):
@@ -217,7 +230,7 @@ If fact_type is "internal", is_internal MUST be true.
 ### Output
 
 Respond ONLY with JSON, no markdown, no explanations.
-If the message is not memorable, respond with is_memorable: false and empty fact_text.`;
+If the message is not memorable, respond with an empty extractions array.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +258,7 @@ export async function classifyMessage(
     timestamp: string;
   },
   sessionId: string
-): Promise<ClassificationResult> {
+): Promise<ClassificationResult[]> {
   try {
     // 1. Retrieve the sliding window from archive
     // We align the classifier window with the agent's context window (keepTurns * 2)
@@ -289,15 +302,18 @@ export async function classifyMessage(
     const response = await callLlmTask(api, prompt, "classifier");
     log(`FULL GEMINI RESPONSE:\n${response}`);
 
-    // 6. Parse the response
-    const result = parseClassification(response, message.sender_id);
-    log(`PARSED: memorable=${result.is_memorable}, topics=${JSON.stringify(result.topics)}, owner=${result.owner_id}, fact_type=${result.fact_type}, fact_text="${result.fact_text}"`);
-    return result;
+    // 6. Parse the response (now returns array)
+    const results = parseClassificationMulti(response, message.sender_id);
+    log(`PARSED: ${results.length} extractions`);
+    for (const r of results) {
+      log(`  → memorable=${r.is_memorable}, topics=${JSON.stringify(r.topics)}, owner=${r.owner_id}, fact_type=${r.fact_type}, fact_text="${r.fact_text}"`);
+    }
+    return results;
   } catch (error) {
     // Safe fallback: don't memorize on error
     console.warn(`[Classifier] Classification error, falling back to non-memorable:`, error);
     log(`CLASSIFICATION FAILED: ${error}`);
-    return createFallbackResult(message.sender_id);
+    return [createFallbackResult(message.sender_id)];
   }
 }
 
@@ -617,13 +633,15 @@ async function resolveGeminiApiKey(api: any): Promise<string | null> {
 // ---------------------------------------------------------------------------
 
 /**
- * Parses the LLM's JSON response into a ClassificationResult.
- * Resilient: handles malformed JSON, missing fields, wrong types.
+ * Parses the LLM's JSON response into ClassificationResult[].
+ * Supports both:
+ *   - New multi-fact format: { topics, is_task, is_internal, extractions: [...] }
+ *   - Legacy single-fact format: { topics, is_task, is_internal, is_memorable, fact_text, ... }
  */
-function parseClassification(
+function parseClassificationMulti(
   raw: string,
   fallbackSenderId: string
-): ClassificationResult {
+): ClassificationResult[] {
   // Remove any markdown wrapper (```json ... ```)
   let cleaned = raw.trim();
   if (cleaned.startsWith("```")) {
@@ -640,18 +658,54 @@ function parseClassification(
       try {
         parsed = JSON.parse(jsonMatch[0]);
       } catch {
-        return createFallbackResult(fallbackSenderId);
+        return [createFallbackResult(fallbackSenderId)];
       }
     } else {
-      return createFallbackResult(fallbackSenderId);
+      return [createFallbackResult(fallbackSenderId)];
     }
   }
 
-  // Validate and normalize each field with safe fallbacks
-  return {
-    topics: normalizeTopics(parsed.topics),
-    is_task: Boolean(parsed.is_task),
-    is_internal: Boolean(parsed.is_internal),
+  // Shared fields
+  const sharedTopics = normalizeTopics(parsed.topics);
+  const isTask = Boolean(parsed.is_task);
+  const isInternal = Boolean(parsed.is_internal);
+
+  // New multi-fact format: has "extractions" array
+  if (Array.isArray(parsed.extractions)) {
+    if (parsed.extractions.length === 0) {
+      // No facts to remember
+      return [{
+        topics: sharedTopics,
+        is_task: isTask,
+        is_internal: isInternal,
+        is_memorable: false,
+        fact_text: "",
+        fact_type: "fact",
+        owner_type: "user",
+        owner_id: fallbackSenderId,
+      }];
+    }
+
+    return parsed.extractions.map((ext: any) => ({
+      topics: sharedTopics,
+      is_task: isTask,
+      is_internal: isInternal,
+      is_memorable: true,
+      fact_text: typeof ext.fact_text === "string" ? ext.fact_text.trim() : "",
+      fact_type: validateFactType(ext.fact_type),
+      owner_type: validateOwnerType(ext.owner_type),
+      owner_id:
+        typeof ext.owner_id === "string" && ext.owner_id.trim()
+          ? ext.owner_id.trim().toLowerCase()
+          : fallbackSenderId,
+    })).filter((r: ClassificationResult) => r.fact_text.length > 0);
+  }
+
+  // Legacy single-fact format (backward compatibility)
+  return [{
+    topics: sharedTopics,
+    is_task: isTask,
+    is_internal: isInternal,
     is_memorable: Boolean(parsed.is_memorable),
     fact_text: typeof parsed.fact_text === "string" ? parsed.fact_text.trim() : "",
     fact_type: validateFactType(parsed.fact_type),
@@ -660,7 +714,7 @@ function parseClassification(
       typeof parsed.owner_id === "string" && parsed.owner_id.trim()
         ? parsed.owner_id.trim().toLowerCase()
         : fallbackSenderId,
-  };
+  }];
 }
 
 /**
