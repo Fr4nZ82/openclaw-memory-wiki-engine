@@ -472,6 +472,14 @@ ISTRUZIONI DI STILE:
 - Per i fatti referenziati, scrivi una breve menzione con link alla pagina di dettaglio
 - Non ripetere il dettaglio completo dei fatti referenziati — il lettore seguirà il link
 
+REGOLA ANTI-RIDONDANZA (CRITICA):
+Quando menzioni una persona o un concetto che ha la propria pagina wiki, usa SOLO il [[wikilink]].
+NON duplicare informazioni che appartengono all'altra pagina.
+SBAGLIATO: "Francesco ([[frodo]]), la cui data di nascita è il 19 aprile 1982, come dettagliato nella sua pagina personale."
+CORRETTO: "Francesco ([[frodo]]), suo compagno."
+Il compleanno di Francesco appartiene alla pagina [[frodo]], non va ripetuto qui.
+Ogni dato deve apparire UNA SOLA VOLTA nell'intera wiki, nella sua pagina primaria.
+
 ISTRUZIONI ACL:
 Alcuni fatti hanno [ACL: type="..." owner="..." sender="..."].
 DEVI avvolgere le informazioni corrispondenti con tag HTML:
