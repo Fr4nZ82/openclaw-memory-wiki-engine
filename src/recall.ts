@@ -34,6 +34,26 @@ import { isAdminMember } from "./users-registry";
 const log = dbg("recall");
 
 // ---------------------------------------------------------------------------
+// Wiki Forge timestamp (for recall filtering)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads the last Wiki Forge execution timestamp from compilation-plan.json.
+ * Used to filter out facts that have already been consolidated into wiki pages.
+ *
+ * If no forge has ever run (file missing), returns null → recall includes all facts.
+ */
+function getLastForgeTimestamp(config: PluginConfig): string | null {
+  const planPath = path.join(config.wikiPath, "_meta", "compilation-plan.json");
+  try {
+    const plan = JSON.parse(fs.readFileSync(planPath, "utf-8"));
+    return plan.generatedAt || null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Identity resolution
 // ---------------------------------------------------------------------------
 
@@ -256,15 +276,25 @@ export async function buildRecallContext(
 
   // -----------------------------------------------------------------
   // 4. Top-K facts from hybrid search
+  //    Wiki-aware filtering: skip facts already consolidated in wiki
+  //    pages. Only fetch episode/plan + facts newer than last Forge.
   // -----------------------------------------------------------------
+  const lastForgeTs = getLastForgeTimestamp(config);
+  if (lastForgeTs) {
+    log(`Wiki-aware recall: filtering facts older than forge at ${lastForgeTs} (keeping episode/plan)`);
+  } else {
+    log(`No forge timestamp found — including all fact types (backward-compatible)`);
+  }
+
   if (charBudget > 300) {
     const facts = await hybridSearch(
       db,
       config,
       userQuery,
       canonicalId,
-      allSenderIds,  // all sender IDs for cross-channel "things I said" visibility
-      config.recallTopK
+      allSenderIds,
+      config.recallTopK,
+      lastForgeTs
     );
     details.vectorSearchUsed = facts.vectorUsed;
     details.factsMatched = facts.results.length;
@@ -503,10 +533,11 @@ async function hybridSearch(
   query: string,
   canonicalId: string,
   allSenderIds: string[],
-  topK: number
+  topK: number,
+  lastForgeTs: string | null
 ): Promise<HybridSearchResult> {
   // BM25: always available
-  const bm25Results = searchBM25(db, query, canonicalId, allSenderIds, topK * 2);
+  const bm25Results = searchBM25(db, query, canonicalId, allSenderIds, topK * 2, lastForgeTs);
 
   // Vector: only if Ollama is online and query is substantial
   let vectorResults: Map<string, number> = new Map();
@@ -515,7 +546,7 @@ async function hybridSearch(
   if (query.length > 20 && (await isOllamaAvailable(config))) {
     try {
       const queryEmbedding = await generateEmbedding(query, config);
-      vectorResults = searchVector(db, queryEmbedding, canonicalId, allSenderIds, topK * 2);
+      vectorResults = searchVector(db, queryEmbedding, canonicalId, allSenderIds, topK * 2, lastForgeTs);
       vectorUsed = true;
     } catch {
       // Ollama unreachable, proceeding with BM25 only
@@ -565,7 +596,8 @@ function searchBM25(
   query: string,
   canonicalId: string,
   allSenderIds: string[],
-  limit: number
+  limit: number,
+  lastForgeTs: string | null
 ): Map<string, number> {
   const results = new Map<string, number>();
 
@@ -587,6 +619,14 @@ function searchBM25(
   // Admin bypass: include init facts for admin users (ADR-020)
   const initClause = senderIsAdmin ? ` OR f.sender_id = 'init'` : '';
 
+  // Wiki-aware filtering: if the forge has run, only fetch temporal facts
+  // (episode/plan) or facts updated after the last forge cycle.
+  // This avoids duplicating knowledge already consolidated in wiki pages.
+  const forgeFilter = lastForgeTs
+    ? `AND (f.fact_type IN ('episode', 'plan') OR f.updated_at > ?)`
+    : '';
+  const forgeParams = lastForgeTs ? [lastForgeTs] : [];
+
   const rows = db
     .prepare(
       `SELECT f.id, bm25(facts_fts) as score
@@ -600,10 +640,11 @@ function searchBM25(
            f.owner_type = 'global' OR
            f.owner_type = 'group'${initClause}
          )
+         ${forgeFilter}
        ORDER BY score
        LIMIT ?`
     )
-    .all(ftsQuery, canonicalId, ...allSenderIds, limit) as Array<{ id: string; score: number }>;
+    .all(ftsQuery, canonicalId, ...allSenderIds, ...forgeParams, limit) as Array<{ id: string; score: number }>;
 
   for (const row of rows) {
     // BM25 returns negative values (more negative = more relevant)
@@ -636,7 +677,8 @@ function searchVector(
   queryEmbedding: number[],
   canonicalId: string,
   allSenderIds: string[],
-  limit: number
+  limit: number,
+  lastForgeTs: string | null
 ): Map<string, number> {
   const results = new Map<string, number>();
 
@@ -649,7 +691,13 @@ function searchVector(
   // Admin bypass: include init facts for admin users (ADR-020)
   const initClause = senderIsAdmin ? ` OR sender_id = 'init'` : '';
 
-  // Load all active facts with embeddings
+  // Wiki-aware filtering (same logic as BM25)
+  const forgeFilter = lastForgeTs
+    ? `AND (fact_type IN ('episode', 'plan') OR updated_at > ?)`
+    : '';
+  const forgeParams = lastForgeTs ? [lastForgeTs] : [];
+
+  // Load active facts with embeddings (filtered by forge timestamp)
   const rows = db
     .prepare(
       `SELECT id, embedding FROM facts
@@ -660,9 +708,10 @@ function searchVector(
            sender_id IN (${senderPlaceholders}) OR
            owner_type = 'global' OR
            owner_type = 'group'${initClause}
-         )`
+         )
+         ${forgeFilter}`
     )
-    .all(canonicalId, ...allSenderIds) as Array<{ id: string; embedding: Buffer }>;
+    .all(canonicalId, ...allSenderIds, ...forgeParams) as Array<{ id: string; embedding: Buffer }>;
 
   for (const row of rows) {
     try {
