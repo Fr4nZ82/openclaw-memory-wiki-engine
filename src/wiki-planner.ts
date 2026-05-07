@@ -207,16 +207,42 @@ async function classifyFacts(
     return line;
   }).join("\n");
 
-  // Build fact list for the prompt
-  const factLines = allFacts.map(f => {
-    const topics = jsonToTopics(f.topics).join(", ");
-    return `[id:${f.id}] "${f.text}" topics=[${topics}] owner_type=${f.owner_type} owner_id=${f.owner_id}`;
-  }).join("\n");
+  // --- Batched classification to avoid MAX_TOKENS truncation ---
+  const BATCH_SIZE = 15;
+  const batches: Fact[][] = [];
+  for (let i = 0; i < allFacts.length; i += BATCH_SIZE) {
+    batches.push(allFacts.slice(i, i + BATCH_SIZE));
+  }
 
-  const prompt = `You are the Cartographer of a personal wiki. You must organize ${allFacts.length} facts into pages.
+  logger.info(`[Cartografo] Splitting ${allFacts.length} facts into ${batches.length} batches of ~${BATCH_SIZE}`);
+
+  const mergedResult: CartographerBlueprint = {
+    assignments: [],
+    new_pages: [],
+    suggested_links: {},
+  };
+
+  // Track new pages across batches so later batches know about them
+  const knownPages = new Set(Object.keys(foundationPages));
+
+  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    const batch = batches[batchIdx];
+
+    const factLines = batch.map(f => {
+      const topics = jsonToTopics(f.topics).join(", ");
+      return `[id:${f.id}] "${f.text}" topics=[${topics}] owner_type=${f.owner_type} owner_id=${f.owner_id}`;
+    }).join("\n");
+
+    // Include new pages from previous batches in the context
+    const prevNewPages = mergedResult.new_pages.length > 0
+      ? "\n\nPAGES CREATED BY PREVIOUS BATCHES (reuse these, do NOT recreate):\n" +
+        mergedResult.new_pages.map(p => `- [concept] ${p.slug} — ${p.description}`).join("\n")
+      : "";
+
+    const prompt = `You are the Cartographer of a personal wiki. You must assign ${batch.length} facts to pages (batch ${batchIdx + 1}/${batches.length}).
 
 EXISTING PAGES (foundation, NOT deletable):
-${foundationDesc}
+${foundationDesc}${prevNewPages}
 
 ASSIGNMENT RULES:
 1. Fact with owner_type="user" (bio, preference, personal habit)
@@ -242,8 +268,7 @@ ${factLines}
 Respond with a JSON with this EXACT structure:
 {
   "assignments": [
-    { "fact_id": 1, "primary_page": "frodo", "referenced_pages": ["lavoro"] },
-    { "fact_id": 2, "primary_page": "regole_casa", "referenced_pages": ["famiglia", "gollum"] }
+    { "fact_id": "id_here", "primary_page": "frodo", "referenced_pages": ["lavoro"] }
   ],
   "new_pages": [
     { "slug": "regole_casa", "title": "Regole della casa", "description": "Regole e abitudini domestiche della famiglia" }
@@ -253,27 +278,70 @@ Respond with a JSON with this EXACT structure:
   }
 }`;
 
-  logger.info(`[Cartografo] Classifying ${allFacts.length} facts with Flash (prompt: ${prompt.length} chars)...`);
+    logger.info(`[Cartografo] Batch ${batchIdx + 1}/${batches.length}: classifying ${batch.length} facts (prompt: ${prompt.length} chars)...`);
 
-  const response = await callLlmTask(api, prompt, "cartografo", 120000);
+    let parsed: CartographerBlueprint | null = null;
+    const maxBatchAttempts = 2;
+    for (let attempt = 1; attempt <= maxBatchAttempts; attempt++) {
+      const response = await callLlmTask(api, prompt, "cartografo", 120000);
 
-  // Parse response
-  let parsed: CartographerBlueprint;
-  try {
-    let cleaned = response.trim();
-    if (cleaned.startsWith("```json")) {
-      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-    } else if (cleaned.startsWith("```")) {
-      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      try {
+        let cleaned = response.trim();
+        if (cleaned.startsWith("```json")) {
+          cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+        } else if (cleaned.startsWith("```")) {
+          cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+        }
+        parsed = JSON.parse(cleaned);
+        break; // Success
+      } catch (err) {
+        logger.warn(`[Cartografo] Batch ${batchIdx + 1} attempt ${attempt}/${maxBatchAttempts} JSON parse failed: ${err}`);
+        if (attempt >= maxBatchAttempts) {
+          logger.error(`[Cartografo] Batch ${batchIdx + 1} failed after ${maxBatchAttempts} attempts. Raw response:\n${response.substring(0, 500)}`);
+          throw err;
+        }
+        await new Promise(r => setTimeout(r, 3000));
+      }
     }
-    parsed = JSON.parse(cleaned);
-  } catch (err) {
-    logger.error(`[Cartografo] JSON parse failed! Raw response:\n${response.substring(0, 500)}`);
-    throw err;
+
+    if (!parsed) throw new Error(`[Cartografo] Batch ${batchIdx + 1} returned null`);
+
+    // Merge assignments
+    if (parsed.assignments) {
+      mergedResult.assignments.push(...parsed.assignments);
+    }
+
+    // Merge new pages (deduplicate by slug)
+    if (parsed.new_pages) {
+      for (const np of parsed.new_pages) {
+        if (!knownPages.has(np.slug)) {
+          knownPages.add(np.slug);
+          mergedResult.new_pages.push(np);
+        }
+      }
+    }
+
+    // Merge suggested links
+    if (parsed.suggested_links) {
+      for (const [slug, links] of Object.entries(parsed.suggested_links)) {
+        if (!mergedResult.suggested_links[slug]) {
+          mergedResult.suggested_links[slug] = links;
+        } else {
+          // Add new links, avoid duplicates
+          for (const l of links) {
+            if (!mergedResult.suggested_links[slug].includes(l)) {
+              mergedResult.suggested_links[slug].push(l);
+            }
+          }
+        }
+      }
+    }
+
+    logger.info(`[Cartografo] Batch ${batchIdx + 1} done: ${parsed.assignments?.length || 0} assignments, ${parsed.new_pages?.length || 0} new pages`);
   }
 
-  logger.info(`[Cartografo] Classified ${parsed.assignments?.length || 0} facts, ${parsed.new_pages?.length || 0} new pages suggested`);
-  return parsed;
+  logger.info(`[Cartografo] All batches complete: ${mergedResult.assignments.length} total assignments, ${mergedResult.new_pages.length} new pages`);
+  return mergedResult;
 }
 
 interface CartographerBlueprint {
