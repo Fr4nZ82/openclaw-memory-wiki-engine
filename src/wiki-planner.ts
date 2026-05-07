@@ -62,6 +62,8 @@ export interface CompilationPlan {
   groupScopes: Record<string, string[]>;
   generatedAt: string;
   factCount: number;
+  /** Pages whose fact set changed since the last plan — only these need recompilation */
+  dirtyPages: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -568,10 +570,89 @@ function buildCompilationPlan(
     groupScopes,
     generatedAt: new Date().toISOString(),
     factCount: allFacts.length,
+    dirtyPages: compilationOrder, // default: all dirty (full rebuild)
   };
 
   logger.info(`[Architetto] Plan: ${compilationOrder.length} pages (${mergedPages.length} merged), ${allFacts.length} facts, order: ${compilationOrder.join(" → ")}`);
   return plan;
+}
+
+// ---------------------------------------------------------------------------
+// Incremental helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Loads the previous compilation plan from disk.
+ * Returns null if not found or corrupted.
+ */
+function loadPreviousPlan(config: PluginConfig, logger: any): CompilationPlan | null {
+  const planPath = path.join(config.wikiPath, "_meta", "compilation-plan.json");
+  try {
+    if (!fs.existsSync(planPath)) return null;
+    const raw = fs.readFileSync(planPath, "utf-8");
+    const plan = JSON.parse(raw) as CompilationPlan;
+    // Basic sanity check
+    if (!plan.pages || !plan.compilationOrder) return null;
+    return plan;
+  } catch (e) {
+    logger.warn(`[Wiki Planner] Could not load previous plan: ${e}`);
+    return null;
+  }
+}
+
+/**
+ * Computes which fact IDs were assigned in a compilation plan.
+ * Returns a Map of fact_id → primary page slug.
+ */
+function extractAssignedFactIds(plan: CompilationPlan): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const [slug, page] of Object.entries(plan.pages)) {
+    for (const f of page.primaryFacts) {
+      map.set(f.id, slug);
+    }
+  }
+  return map;
+}
+
+/**
+ * Computes the set of pages affected by a set of fact changes.
+ * A page is dirty if it gained or lost primary or referenced facts.
+ */
+function computeDirtyPages(
+  prevPlan: CompilationPlan,
+  newPlan: CompilationPlan
+): string[] {
+  const dirty = new Set<string>();
+
+  // Compute fact fingerprints per page for both plans
+  const fingerprint = (plan: CompilationPlan): Map<string, string> => {
+    const map = new Map<string, string>();
+    for (const [slug, page] of Object.entries(plan.pages)) {
+      const primaryIds = page.primaryFacts.map(f => f.id).sort().join(",");
+      const refIds = page.referencedFacts.map(f => f.id).sort().join(",");
+      map.set(slug, `${primaryIds}|${refIds}`);
+    }
+    return map;
+  };
+
+  const prevFP = fingerprint(prevPlan);
+  const newFP = fingerprint(newPlan);
+
+  // Pages in new plan that are new or changed
+  for (const [slug, fp] of newFP) {
+    if (!prevFP.has(slug) || prevFP.get(slug) !== fp) {
+      dirty.add(slug);
+    }
+  }
+
+  // Pages that were removed (existed before but not now) — mark for cleanup later if needed
+  for (const slug of prevFP.keys()) {
+    if (!newFP.has(slug)) {
+      dirty.add(slug);
+    }
+  }
+
+  return Array.from(dirty);
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +662,10 @@ function buildCompilationPlan(
 /**
  * Runs Stages 0-2 of the Wiki Forge pipeline:
  * Fonditore → Cartografo → Architetto → CompilationPlan
+ *
+ * INCREMENTAL MODE: If a previous compilation plan exists, only new facts
+ * are sent to the Cartografo. If nothing changed, the previous plan is
+ * reused entirely (zero LLM calls).
  */
 export async function buildWikiPlan(
   api: any,
@@ -597,20 +682,131 @@ export async function buildWikiPlan(
     logger.warn("[Wiki Planner] No active facts found, creating skeleton-only plan");
   }
 
-  // Stadio 0: Il Fonditore
+  // Stadio 0: Il Fonditore (always runs — $0)
   logger.info("[Wiki Planner] === Stadio 0: Il Fonditore ===");
   const { pages: foundationPages, groupScopes } = buildFoundationPages(db, logger);
 
-  // Stadio 1: Il Cartografo (skip if no facts)
+  // --- Incremental delta computation ---
+  const prevPlan = loadPreviousPlan(config, logger);
+  const currentFactIds = new Set(allFacts.map(f => f.id));
+
   let blueprint: CartographerBlueprint = { assignments: [], new_pages: [], suggested_links: {} };
-  if (allFacts.length > 0) {
-    logger.info("[Wiki Planner] === Stadio 1: Il Cartografo ===");
+
+  if (prevPlan && allFacts.length > 0) {
+    // Compute delta: which facts are new, which are gone
+    const prevAssigned = extractAssignedFactIds(prevPlan);
+    const newFacts = allFacts.filter(f => !prevAssigned.has(f.id));
+    const removedFactIds = Array.from(prevAssigned.keys()).filter(id => !currentFactIds.has(id));
+
+    if (newFacts.length === 0 && removedFactIds.length === 0) {
+      // FAST PATH: nothing changed, reuse previous plan entirely
+      logger.info(`[Wiki Planner] === Stadio 1: Il Cartografo (SKIPPED — 0 new, 0 removed facts) ===`);
+      logger.info(`[Wiki Planner] === Stadio 2: L'Architetto (SKIPPED — reusing previous plan) ===`);
+
+      // Refresh the timestamp and mark no pages dirty
+      const reusedPlan: CompilationPlan = {
+        ...prevPlan,
+        generatedAt: new Date().toISOString(),
+        dirtyPages: [],
+      };
+
+      // Persist (refreshed timestamp)
+      const planPath = path.join(config.wikiPath, "_meta", "compilation-plan.json");
+      fs.mkdirSync(path.dirname(planPath), { recursive: true });
+      fs.writeFileSync(planPath, JSON.stringify(reusedPlan, null, 2), "utf-8");
+      dlog(`Plan reused (no changes), saved to ${planPath}`);
+
+      return reusedPlan;
+    }
+
+    // INCREMENTAL PATH: classify only new facts, reuse old assignments
+    logger.info(`[Wiki Planner] === Stadio 1: Il Cartografo (INCREMENTAL — ${newFacts.length} new, ${removedFactIds.length} removed) ===`);
+
+    // Start with old assignments (pruned of removed facts)
+    for (const [slug, page] of Object.entries(prevPlan.pages)) {
+      // Carry over old assignments as blueprint assignments
+      for (const f of page.primaryFacts) {
+        if (currentFactIds.has(f.id)) {
+          blueprint.assignments.push({
+            fact_id: f.id,
+            primary_page: slug,
+            referenced_pages: [],
+          });
+        }
+      }
+    }
+
+    // Carry over old referenced_pages info
+    for (const [slug, page] of Object.entries(prevPlan.pages)) {
+      for (const ref of page.referencedFacts) {
+        if (currentFactIds.has(ref.id)) {
+          const existing = blueprint.assignments.find(a => a.fact_id === ref.id);
+          if (existing && !existing.referenced_pages.includes(slug)) {
+            existing.referenced_pages.push(slug);
+          }
+        }
+      }
+    }
+
+    // Carry over old new_pages and suggested_links
+    for (const [slug, page] of Object.entries(prevPlan.pages)) {
+      if (page.pageType === "concept") {
+        blueprint.new_pages.push({
+          slug: page.slug,
+          title: page.title,
+          description: page.description,
+        });
+      }
+    }
+    blueprint.suggested_links = { ...(prevPlan.linkGraph || {}) };
+
+    // Classify only new facts
+    if (newFacts.length > 0) {
+      const newBlueprint = await classifyFacts(api, db, config, newFacts, foundationPages, groupScopes, logger);
+
+      // Merge new assignments
+      blueprint.assignments.push(...(newBlueprint.assignments || []));
+
+      // Merge new pages (deduplicate by slug)
+      const knownSlugs = new Set(blueprint.new_pages.map(p => p.slug));
+      for (const np of (newBlueprint.new_pages || [])) {
+        if (!knownSlugs.has(np.slug)) {
+          knownSlugs.add(np.slug);
+          blueprint.new_pages.push(np);
+        }
+      }
+
+      // Merge suggested links
+      for (const [slug, links] of Object.entries(newBlueprint.suggested_links || {})) {
+        if (!blueprint.suggested_links[slug]) {
+          blueprint.suggested_links[slug] = links;
+        } else {
+          for (const l of links) {
+            if (!blueprint.suggested_links[slug].includes(l)) {
+              blueprint.suggested_links[slug].push(l);
+            }
+          }
+        }
+      }
+    }
+  } else if (allFacts.length > 0) {
+    // FULL REBUILD: no previous plan exists
+    logger.info("[Wiki Planner] === Stadio 1: Il Cartografo (FULL — no previous plan) ===");
     blueprint = await classifyFacts(api, db, config, allFacts, foundationPages, groupScopes, logger);
   }
 
   // Stadio 2: L'Architetto
   logger.info("[Wiki Planner] === Stadio 2: L'Architetto ===");
   const plan = buildCompilationPlan(allFacts, foundationPages, blueprint, groupScopes, logger);
+
+  // Compute dirty pages by comparing with previous plan
+  if (prevPlan) {
+    plan.dirtyPages = computeDirtyPages(prevPlan, plan);
+    logger.info(`[Wiki Planner] Dirty pages: ${plan.dirtyPages.length}/${plan.compilationOrder.length} (${plan.dirtyPages.join(", ") || "none"})`);
+  } else {
+    // No previous plan → all pages are dirty (full rebuild)
+    plan.dirtyPages = [...plan.compilationOrder];
+  }
 
   // Persist plan for debugging and incremental updates
   const planPath = path.join(config.wikiPath, "_meta", "compilation-plan.json");

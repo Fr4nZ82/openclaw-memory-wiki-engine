@@ -534,8 +534,11 @@ export async function callLlmTask(api: any, prompt: string, callerLabel?: string
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             responseMimeType: "application/json",
-            temperature: 0.1,
-            maxOutputTokens: 16384,
+            temperature: 1.0, // Gemini 3 recommendation — lower values cause loops/degraded performance
+            maxOutputTokens: 65536, // Model max. CRITICAL: this is a COMBINED budget for thinking + output tokens in Gemini 3
+            thinkingConfig: {
+              thinkingLevel: "minimal", // Classification/JSON tasks don't need reasoning. Default "high" consumes most of maxOutputTokens budget.
+            },
           },
         }),
         signal: AbortSignal.timeout(timeoutMs),
@@ -556,6 +559,8 @@ export async function callLlmTask(api: any, prompt: string, callerLabel?: string
       
       if (finishReason === "MAX_TOKENS") {
         log("WARNING: Gemini output was truncated due to MAX_TOKENS!");
+        // Treat as retryable error — returning truncated JSON causes downstream parse failures
+        throw new Error(`Gemini output truncated (MAX_TOKENS, got ${content?.length || 0} chars). Model may be overloaded — retrying.`);
       }
       if (!content) {
         log(`Gemini raw response: ${JSON.stringify(data).substring(0, 500)}`);

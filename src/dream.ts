@@ -485,14 +485,21 @@ export async function forgeWiki(
 
   const plan = await buildWikiPlan(api, db, config, logger);
 
-  // Stage 3: Il Cronista — compile each page with Pro
-  logger.info("[Wiki Forge] === Stadio 3: Il Cronista ===");
-  for (const slug of plan.compilationOrder) {
-    try {
-      const updated = await compilePage(api, db, config, plan, slug, logger);
-      if (updated) pagesUpdated++;
-    } catch (e) {
-      logger.error(`[Wiki Forge] Failed to compile page "${slug}": ${e}`);
+  // Stage 3: Il Cronista — compile only dirty pages with Pro
+  const dirtyPages = plan.dirtyPages || plan.compilationOrder;
+  if (dirtyPages.length === 0) {
+    logger.info("[Wiki Forge] === Stadio 3: Il Cronista (SKIPPED — 0 dirty pages) ===");
+  } else {
+    logger.info(`[Wiki Forge] === Stadio 3: Il Cronista (${dirtyPages.length}/${plan.compilationOrder.length} dirty pages) ===`);
+    for (const slug of dirtyPages) {
+      // Only compile pages that exist in the plan
+      if (!plan.pages[slug]) continue;
+      try {
+        const updated = await compilePage(api, db, config, plan, slug, logger);
+        if (updated) pagesUpdated++;
+      } catch (e) {
+        logger.error(`[Wiki Forge] Failed to compile page "${slug}": ${e}`);
+      }
     }
   }
 
