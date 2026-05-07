@@ -505,7 +505,7 @@ IMPORTANT: The JSON must be valid. Escape quotes (\\"  ) and newlines (\\\\n) in
     try {
       attempts++;
       logger.info(`[Cronista] Writing "${pagePlan.title}" with Pro (attempt ${attempts}/${maxAttempts})...`);
-      const response = await callLlmTask(api, prompt, "cronista", 180000, PRO_MODEL);
+      const response = await callLlmTask(api, prompt, "cronista", 180000, PRO_MODEL, "low");
 
       const parsed = parseJsonFromLlm(response, `compilePage(${slug})`, logger);
       if (parsed.mergedBody) mergedBody = parsed.mergedBody.replace(/\\n/g, "\n");

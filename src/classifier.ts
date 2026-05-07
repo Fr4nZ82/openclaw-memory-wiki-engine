@@ -510,7 +510,7 @@ function writeClassifierAudit(prompt: string, model: string, response: string): 
  *
  * Uses the REST API with JSON response mode for fast, structured output.
  */
-export async function callLlmTask(api: any, prompt: string, callerLabel?: string, timeoutMs: number = 60000, model: string = "gemini-3-flash-preview"): Promise<string> {
+export async function callLlmTask(api: any, prompt: string, callerLabel?: string, timeoutMs: number = 60000, model: string = "gemini-3-flash-preview", thinkingLevel: string = "minimal"): Promise<string> {
   const apiKey = await resolveGeminiApiKey(api);
   if (!apiKey) {
     throw new Error("No Gemini API key found (checked api.runtime.modelAuth, env, ~/.openclaw/.env)");
@@ -537,7 +537,7 @@ export async function callLlmTask(api: any, prompt: string, callerLabel?: string
             temperature: 1.0, // Gemini 3 recommendation — lower values cause loops/degraded performance
             maxOutputTokens: 65536, // Model max. CRITICAL: this is a COMBINED budget for thinking + output tokens in Gemini 3
             thinkingConfig: {
-              thinkingLevel: "minimal", // Classification/JSON tasks don't need reasoning. Default "high" consumes most of maxOutputTokens budget.
+              thinkingLevel: thinkingLevel, // Dynamic thinking level depending on the task
             },
           },
         }),

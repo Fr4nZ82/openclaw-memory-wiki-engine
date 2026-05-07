@@ -285,7 +285,7 @@ Respond with a JSON with this EXACT structure:
     let parsed: CartographerBlueprint | null = null;
     const maxBatchAttempts = 2;
     for (let attempt = 1; attempt <= maxBatchAttempts; attempt++) {
-      const response = await callLlmTask(api, prompt, "cartografo", 120000);
+      const response = await callLlmTask(api, prompt, "cartografo", 120000, "gemini-3-flash-preview", "minimal");
 
       try {
         let cleaned = response.trim();

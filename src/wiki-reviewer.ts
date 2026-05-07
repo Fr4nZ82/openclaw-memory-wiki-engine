@@ -93,7 +93,7 @@ If there are no issues, respond with ok: true and empty issues.`;
 
   try {
     logger.info(`[Revisore] Reviewing wiki structure (${plan.compilationOrder.length} pages)...`);
-    const response = await callLlmTask(api, prompt, "revisore", 120000, PRO_MODEL);
+    const response = await callLlmTask(api, prompt, "revisore", 120000, PRO_MODEL, "low");
 
     let parsed: ReviewResult;
     try {
