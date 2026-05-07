@@ -413,7 +413,8 @@ function register(api: any): void {
             text.startsWith("# MEMORY.md") ||
             text.startsWith("## Memory context") ||
             text.startsWith("## Routing hints") ||
-            text.startsWith("A new session was started")
+            text.startsWith("A new session was started") ||
+            text.startsWith("[New session started]")
           );
         }
 
@@ -489,9 +490,9 @@ function register(api: any): void {
           }
         }
 
-        // 2. Fall back to messages array
+        // 2. Fall back to messages array (only if event.prompt didn't already find the query)
 
-        for (let i = messages.length - 1; i >= 0; i--) {
+        if (foundMsgIdx === -1) for (let i = messages.length - 1; i >= 0; i--) {
           const msg = messages[i];
           if (msg.role !== "user") continue;
 
@@ -605,9 +606,12 @@ function register(api: any): void {
         let ctxSenderId = "";
         if (ctx?.sessionKey) {
           const parts = ctx.sessionKey.split(":");
-          const lastPart = parts[parts.length - 1];
-          if (lastPart && /^\d+$/.test(lastPart)) {
-            ctxSenderId = lastPart;
+          // Scan backwards for the first numeric segment (handles :heartbeat, :cron suffixes)
+          for (let p = parts.length - 1; p >= 0; p--) {
+            if (/^\d+$/.test(parts[p])) {
+              ctxSenderId = parts[p];
+              break;
+            }
           }
         }
 
