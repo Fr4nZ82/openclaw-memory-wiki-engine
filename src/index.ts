@@ -177,7 +177,7 @@ function register(api: any): void {
   // -------------------------------------------------------------------
 
   if (api.on) {
-    api.on("message_received", async (event: any) => {
+    api.on("message_received", async (event: any, ctx: any) => {
       const database = getDb();
       if (!database || !config) {
         dlog(`Hook message_received SKIPPED: db=${!!database}, config=${!!config}`);
@@ -186,14 +186,18 @@ function register(api: any): void {
 
       try {
         dlog(`event keys: ${Object.keys(event).join(', ')}`);
-        dlog(`event.from=${event.from}, metadata=${JSON.stringify(event.metadata || {})}`);
+        dlog(`event.from=${event.from}, ctx.sessionKey=${ctx?.sessionKey}, metadata=${JSON.stringify(event.metadata || {})}`);
 
         // SDK hook event shape (from Hooks docs):
         //   from, content, timestamp, metadata { senderId, senderName, channelId, guildId }
         const senderId = event.metadata?.senderId || event.from || "unknown";
         const senderName = event.metadata?.senderName || event.from || "unknown";
-        // Session key: prefer channelId, fall back to "from" field (e.g. "telegram:7776007798")
-        const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || event.from || "unknown";
+        // Session key: prefer ctx.sessionKey (canonical), fall back to metadata/from
+        const sessionKey = ctx?.sessionKey
+          || event.metadata?.sessionKey
+          || event.metadata?.channelId
+          || event.from
+          || "unknown";
 
         // Extract numeric ID from senderId (e.g. "telegram:7776007798" → "7776007798")
         const numericMatch = senderId.match(/(\d{5,})/);
@@ -286,14 +290,23 @@ function register(api: any): void {
     // Hook: message_sending — archive assistant responses
     // -------------------------------------------------------------------
 
-    api.on("message_sending", (event: any) => {
+    api.on("message_sending", (event: any, ctx: any) => {
       const database = getDb();
       if (!database) return;
 
       try {
-        dlog(`message_sending event keys: ${Object.keys(event).join(', ')}, metadata keys: ${event.metadata ? Object.keys(event.metadata).join(', ') : 'none'}, to=${event.to}, from=${event.from}`);
+        // ctx.sessionKey is the canonical source (e.g. "agent:main:telegram:direct:7776007798" or "...7776007798:cron")
+        // event.metadata is a fallback for older OpenClaw versions
+        const sessionKey = ctx?.sessionKey
+          || event.metadata?.sessionKey
+          || event.metadata?.channelId
+          || event.to
+          || event.from
+          || "unknown";
+
+        dlog(`message_sending: ctx.sessionKey=${ctx?.sessionKey}, event.metadata.sessionKey=${event.metadata?.sessionKey}, resolved=${sessionKey}`);
+
         const text = event.content || event.text || "";
-        const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || event.to || event.from || "unknown";
 
         const message: IncomingMessage = {
           text,
