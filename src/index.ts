@@ -291,8 +291,9 @@ function register(api: any): void {
       if (!database) return;
 
       try {
+        dlog(`message_sending event keys: ${Object.keys(event).join(', ')}, metadata keys: ${event.metadata ? Object.keys(event.metadata).join(', ') : 'none'}, to=${event.to}, from=${event.from}`);
         const text = event.content || event.text || "";
-        const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || "unknown";
+        const sessionKey = event.metadata?.sessionKey || event.metadata?.channelId || event.to || event.from || "unknown";
 
         const message: IncomingMessage = {
           text,
@@ -1035,7 +1036,12 @@ function register(api: any): void {
                 `- Wiki pages updated: ${report.wikiPagesUpdated}`,
                 report.errors.length > 0 ? `⚠️ Errors: ${report.errors.length}` : "",
               ].filter(Boolean).join("\n");
-              api.sendMessage(ctx.sessionKey, text).catch(() => { });
+              ocLog.info(`[Dream] Sending REM report to ${ctx.sessionKey}`);
+              api.sendMessage(ctx.sessionKey, text).catch((err: any) => {
+                ocLog.warn(`[Dream] Failed to send REM report via Telegram: ${err}`);
+              });
+            } else {
+              ocLog.warn(`[Dream] Cannot send report: api.sendMessage=${!!api.sendMessage}, sessionKey=${ctx.sessionKey}`);
             }
           }).catch(e => {
             ocLog.error(`[Dream] Manual Dream REM failed: ${e}`);
