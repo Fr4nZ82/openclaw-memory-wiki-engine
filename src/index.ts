@@ -173,6 +173,30 @@ function register(api: any): void {
   });
 
   // -------------------------------------------------------------------
+  // Session key resolution helper
+  // -------------------------------------------------------------------
+
+  /**
+   * Resolves a consistent session key across all message hooks.
+   * 
+   * Problem: ctx.sessionKey is undefined in message_received/message_sending hooks.
+   * message_received has event.from = "telegram:7776007798" but message_sending
+   * has event.to/from = "7776007798" (no prefix). This causes the classifier's
+   * sliding window query (WHERE session_id = ?) to miss cron-triggered messages.
+   * 
+   * Solution: use event.metadata.to ("telegram:7776007798") as primary source
+   * — it's consistent across both hooks. Fall back to event.from for message_received.
+   */
+  function resolveSessionKey(event: any, ctx: any): string {
+    return ctx?.sessionKey
+      || event.metadata?.sessionKey
+      || event.metadata?.to       // "telegram:7776007798" — consistent across hooks
+      || event.from               // "telegram:7776007798" in message_received
+      || event.to                 // "7776007798" in message_sending (last resort)
+      || "unknown";
+  }
+
+  // -------------------------------------------------------------------
   // Hook: message_received — capture user messages
   // -------------------------------------------------------------------
 
@@ -192,12 +216,7 @@ function register(api: any): void {
         //   from, content, timestamp, metadata { senderId, senderName, channelId, guildId }
         const senderId = event.metadata?.senderId || event.from || "unknown";
         const senderName = event.metadata?.senderName || event.from || "unknown";
-        // Session key: prefer ctx.sessionKey (canonical), fall back to metadata/from
-        const sessionKey = ctx?.sessionKey
-          || event.metadata?.sessionKey
-          || event.metadata?.channelId
-          || event.from
-          || "unknown";
+        const sessionKey = resolveSessionKey(event, ctx);
 
         // Extract numeric ID from senderId (e.g. "telegram:7776007798" → "7776007798")
         const numericMatch = senderId.match(/(\d{5,})/);
@@ -242,12 +261,6 @@ function register(api: any): void {
 
           if (!ollamaOnline) {
             ocLog.warn(`[Capture] 🛑 KILL-SWITCH ACTIVATED: Memory overflow (${pendingCount} pending) and Ollama is OFFLINE. Capture blocked.`);
-            // Inform the user if possible via generic text response using the SDK, though not guaranteed to halt Samwise's reasoning hook
-            try {
-              if (api.sendMessage) {
-                await api.sendMessage(event.from, "⚠️ [Memory Engine] Il mio sistema di memoria è in overflow e la torre GPU è irraggiungibile per la compressione. Non memorizzerò più nuovi fatti finché il problema non sarà risolto.");
-              }
-            } catch (err) { }
             return; // Abort capture pipeline completely
           }
         }
@@ -295,16 +308,8 @@ function register(api: any): void {
       if (!database) return;
 
       try {
-        // ctx.sessionKey is the canonical source (e.g. "agent:main:telegram:direct:7776007798" or "...7776007798:cron")
-        // event.metadata is a fallback for older OpenClaw versions
-        const sessionKey = ctx?.sessionKey
-          || event.metadata?.sessionKey
-          || event.metadata?.channelId
-          || event.to
-          || event.from
-          || "unknown";
-
-        dlog(`message_sending: ctx.sessionKey=${ctx?.sessionKey}, event.metadata.sessionKey=${event.metadata?.sessionKey}, resolved=${sessionKey}`);
+        const sessionKey = resolveSessionKey(event, ctx);
+        dlog(`message_sending: ctx.sessionKey=${ctx?.sessionKey}, metadata.to=${event.metadata?.to}, event.to=${event.to}, event.from=${event.from}, resolved=${sessionKey}`);
 
         const text = event.content || event.text || "";
 
@@ -1038,32 +1043,12 @@ function register(api: any): void {
         if (type === "rem") {
           // Esegue in background per non bloccare il polling di Telegram (può durare minuti)
           dreamRem(api, database, config, ocLog).then(report => {
-            if (api.sendMessage && ctx.sessionKey) {
-              const text = [
-                `🌙 Dream REM complete`,
-                `- Captures processed: ${report.capturesProcessed}`,
-                `- Facts created: ${report.factsCreated}`,
-                `- Superseded: ${report.factsSuperseded}`,
-                `- De-duplicated: ${report.factsDeduplicated}`,
-                `- Decayed: ${report.factsDecayed}`,
-                `- Wiki pages updated: ${report.wikiPagesUpdated}`,
-                report.errors.length > 0 ? `⚠️ Errors: ${report.errors.length}` : "",
-              ].filter(Boolean).join("\n");
-              ocLog.info(`[Dream] Sending REM report to ${ctx.sessionKey}`);
-              api.sendMessage(ctx.sessionKey, text).catch((err: any) => {
-                ocLog.warn(`[Dream] Failed to send REM report via Telegram: ${err}`);
-              });
-            } else {
-              ocLog.warn(`[Dream] Cannot send report: api.sendMessage=${!!api.sendMessage}, sessionKey=${ctx.sessionKey}`);
-            }
+            ocLog.info(`[Dream] REM complete: captures=${report.capturesProcessed}, facts=${report.factsCreated}, superseded=${report.factsSuperseded}, dedup=${report.factsDeduplicated}, decayed=${report.factsDecayed}, wiki=${report.wikiPagesUpdated}${report.errors.length > 0 ? `, errors=${report.errors.length}` : ''}`);
           }).catch(e => {
             ocLog.error(`[Dream] Manual Dream REM failed: ${e}`);
-            if (api.sendMessage && ctx.sessionKey) {
-              api.sendMessage(ctx.sessionKey, `⚠️ Error during Dream REM: ${e}`).catch(() => { });
-            }
           });
 
-          return { text: "🌙 Deep REM avviato in background. Potrebbe volerci qualche minuto, ti avviserò al termine." };
+          return { text: "🌙 Deep REM avviato in background. Il report apparirà nei log di sistema." };
         } else {
           const report = await dreamLight(api, database, config, ocLog);
           return {
