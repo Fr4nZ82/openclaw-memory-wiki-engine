@@ -503,17 +503,16 @@ export async function forgeWiki(
     }
   }
 
-  // Stage 4: Il Revisore — quality assurance (only if >5 pages compiled)
-  if (pagesUpdated > 5) {
-    logger.info("[Wiki Forge] === Stadio 4: Il Revisore ===");
-    try {
-      const review = await reviewWiki(api, db, config, plan, logger);
-      if (!review.ok) {
-        logger.warn(`[Wiki Forge] Reviewer found ${review.issues.length} issues: ${review.summary}`);
-      }
-    } catch (e) {
-      logger.warn(`[Wiki Forge] Reviewer failed (non-critical): ${e}`);
+  // Stage 4: Il Revisore — quality assurance (sempre, ora deterministico zero-LLM)
+  logger.info("[Wiki Forge] === Stadio 4: Il Revisore ===");
+  try {
+    const review = await reviewWiki(api, db, config, plan, logger);
+    if (!review.ok) {
+      const errors = review.issues.filter(i => i.severity === "error").length;
+      logger.warn(`[Wiki Forge] ⚠️ Reviewer: ${errors} error, ${review.issues.length - errors} warning. Suggerito: /dream rebuild se duplicazione presente.`);
     }
+  } catch (e) {
+    logger.warn(`[Wiki Forge] Reviewer failed (non-critical): ${e}`);
   }
 
   // Update topic index from the compilation plan
@@ -527,8 +526,12 @@ export async function forgeWiki(
 }
 
 /**
- * Updates topic-index.json from the compilation plan.
- * Maps topics → wiki pages based on fact assignments.
+ * Updates topic-index.json + index.md from the compilation plan.
+ *
+ * INDEX GERARCHICO: l'index.md mostra SOLO gli HUB di alto livello
+ * (group_theme + concept_hub senza parentHub). I leaf (persone, concept_leaf)
+ * sono raggiungibili tramite il loro hub padre. Questo costringe l'agente
+ * a passare per il contesto generale prima di scendere al dettaglio.
  */
 function updateTopicIndexFromPlan(plan: CompilationPlan, config: PluginConfig): void {
   const index: Record<string, string[]> = {};
@@ -536,11 +539,10 @@ function updateTopicIndexFromPlan(plan: CompilationPlan, config: PluginConfig): 
   for (const [slug, page] of Object.entries(plan.pages)) {
     const pagePath = `pages/${slug}.md`;
 
-    // The page itself is indexed under its own slug
     if (!index[slug]) index[slug] = [];
     if (!index[slug].includes(pagePath)) index[slug].push(pagePath);
 
-    // Index from primary facts' topics
+    // Index per owner (per recall lookup)
     for (const f of page.primaryFacts) {
       const ownerSlug = f.ownerId?.toLowerCase().replace(/[^a-z0-9]+/g, "_") || "";
       if (ownerSlug && ownerSlug !== slug) {
@@ -549,7 +551,6 @@ function updateTopicIndexFromPlan(plan: CompilationPlan, config: PluginConfig): 
       }
     }
 
-    // Index from linked pages
     for (const link of (plan.linkGraph[slug] || [])) {
       if (!index[link]) index[link] = [];
       if (!index[link].includes(pagePath)) index[link].push(pagePath);
@@ -560,40 +561,74 @@ function updateTopicIndexFromPlan(plan: CompilationPlan, config: PluginConfig): 
   fs.mkdirSync(path.dirname(indexPath), { recursive: true });
   fs.writeFileSync(indexPath, JSON.stringify(index, null, 2), "utf-8");
 
-  // Generate index.md
+  // ---- Generate index.md — solo HUB di top-level ----
   const indexMdPath = path.join(config.wikiPath, "index.md");
-  const sortedTopics = Object.keys(plan.pages).sort();
+
+  // Top-level hubs: group_theme + concept_hub senza parentHub
+  const topLevelHubs = Object.values(plan.pages)
+    .filter(p => {
+      if (p.pageType === "group_theme") return !p.parentHub;
+      if (p.pageType === "concept_hub") return !p.parentHub;
+      return false;
+    })
+    .sort((a, b) => a.slug.localeCompare(b.slug));
+
+  // Orphan top-level pages (concept_leaf or person without a parentHub) — fallback section
+  const orphanLeaves = Object.values(plan.pages)
+    .filter(p => (p.pageType === "concept_leaf" || p.pageType === "person") && !p.parentHub)
+    .sort((a, b) => a.slug.localeCompare(b.slug));
 
   const indexMdLines = [
     "---",
     "title: Indice Wiki",
-    "description: Indice generale della memoria di Samvise",
+    "description: Indice gerarchico della memoria di Samvise (HUB di alto livello)",
     `updated: ${new Date().toISOString().split("T")[0]}`,
     "---",
     "# Indice della Memoria",
     "",
-    "Questo indice è generato automaticamente da La Forgia della Wiki.",
+    "Questo indice elenca solo gli **HUB di alto livello**. Ogni hub apre l'overview di un dominio e linka alle pagine di dettaglio. Per trovare informazioni segui la gerarchia hub → leaf.",
     "",
-    "## Persone",
+    "## Hub",
     "",
-    ...sortedTopics
-      .filter(s => plan.pages[s]?.pageType === "person")
-      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
-    "",
-    "## Gruppi",
-    "",
-    ...sortedTopics
-      .filter(s => plan.pages[s]?.pageType === "group_theme")
-      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
-    "",
-    "## Argomenti",
-    "",
-    ...sortedTopics
-      .filter(s => plan.pages[s]?.pageType === "concept")
-      .map(s => `- [[${s}|${plan.pages[s].title}]]`),
+    ...topLevelHubs.map(p => {
+      const childCount = p.childLeaves.length;
+      return `- [[${p.slug}|${p.title}]] — ${p.description || "(no description)"}${childCount > 0 ? ` *(${childCount} pagine)*` : ""}`;
+    }),
   ];
 
+  if (orphanLeaves.length > 0) {
+    indexMdLines.push(
+      "",
+      "## Pagine senza hub",
+      "",
+      "Queste pagine non sono ancora collegate a un hub di alto livello.",
+      "",
+      ...orphanLeaves.map(p => `- [[${p.slug}|${p.title}]] — ${p.description || ""}`)
+    );
+  }
+
   fs.writeFileSync(indexMdPath, indexMdLines.join("\n"), "utf-8");
+}
+
+/**
+ * Cancella il compilation-plan (e opzionalmente il concept-registry) per
+ * forzare un full rebuild al prossimo REM.
+ *
+ * @param hard - se true, cancella anche concept-registry.json
+ */
+export function wipeWikiPlan(config: PluginConfig, hard: boolean, logger: any): void {
+  const planPath = path.join(config.wikiPath, "_meta", "compilation-plan.json");
+  if (fs.existsSync(planPath)) {
+    fs.unlinkSync(planPath);
+    logger.info(`[Wiki Forge] Wiped compilation-plan.json`);
+  }
+  if (hard) {
+    const regPath = path.join(config.wikiPath, "_meta", "concept-registry.json");
+    if (fs.existsSync(regPath)) {
+      fs.unlinkSync(regPath);
+      logger.info(`[Wiki Forge] Wiped concept-registry.json (hard rebuild)`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

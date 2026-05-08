@@ -1029,38 +1029,55 @@ function register(api: any): void {
 
   if (api.registerCommand) {
     // /dream — manual trigger
+    //   /dream            → light dream
+    //   /dream rem        → REM dream (incremental wiki forge)
+    //   /dream rebuild    → wipe compilation-plan, REM full-rebuild della wiki
+    //   /dream rebuild --hard → wipe anche concept-registry (riparti da zero)
     api.registerCommand({
       name: "dream",
-      description: "Runs a memory consolidation cycle (pass 'rem' for deep)",
+      description: "Runs a memory consolidation cycle (rem / rebuild [--hard])",
       acceptsArgs: true,
       requireAuth: false,
       handler: async (ctx: { args?: string; sessionKey?: string }) => {
         const database = getDb();
         if (!database || !config) return { text: "Plugin not initialized" };
 
-        const type = ctx.args?.trim().toLowerCase() === "rem" ? "rem" : "light";
+        const args = (ctx.args ?? "").trim().toLowerCase();
+        const isRebuild = args.startsWith("rebuild");
+        const isHard = args.includes("--hard");
+        const isRem = isRebuild || args === "rem";
 
-        if (type === "rem") {
-          // Esegue in background per non bloccare il polling di Telegram (può durare minuti)
+        if (isRebuild) {
+          try {
+            const { wipeWikiPlan } = await import("./dream");
+            wipeWikiPlan(config, isHard, ocLog);
+          } catch (e) {
+            ocLog.error(`[Dream] wipeWikiPlan failed: ${e}`);
+            return { text: `❌ Rebuild abortito: ${e}` };
+          }
+        }
+
+        if (isRem) {
           dreamRem(api, database, config, ocLog).then(report => {
             ocLog.info(`[Dream] REM complete: captures=${report.capturesProcessed}, facts=${report.factsCreated}, superseded=${report.factsSuperseded}, dedup=${report.factsDeduplicated}, decayed=${report.factsDecayed}, wiki=${report.wikiPagesUpdated}${report.errors.length > 0 ? `, errors=${report.errors.length}` : ''}`);
           }).catch(e => {
             ocLog.error(`[Dream] Manual Dream REM failed: ${e}`);
           });
 
-          return { text: "🌙 Deep REM avviato in background. Il report apparirà nei log di sistema." };
-        } else {
-          const report = await dreamLight(api, database, config, ocLog);
-          return {
-            text: [
-              `🌙 Dream Light complete`,
-              `- Captures processed: ${report.capturesProcessed}`,
-              `- Facts created: ${report.factsCreated}`,
-              `- Superseded: ${report.factsSuperseded}`,
-              report.errors.length > 0 ? `⚠️ Errors: ${report.errors.length}` : "",
-            ].filter(Boolean).join("\n"),
-          };
+          const label = isRebuild ? (isHard ? "REBUILD (hard) " : "REBUILD ") : "REM ";
+          return { text: `🌙 ${label}avviato in background. Report nei log di sistema.` };
         }
+
+        const report = await dreamLight(api, database, config, ocLog);
+        return {
+          text: [
+            `🌙 Dream Light complete`,
+            `- Captures processed: ${report.capturesProcessed}`,
+            `- Facts created: ${report.factsCreated}`,
+            `- Superseded: ${report.factsSuperseded}`,
+            report.errors.length > 0 ? `⚠️ Errors: ${report.errors.length}` : "",
+          ].filter(Boolean).join("\n"),
+        };
       },
     });
 

@@ -1,17 +1,23 @@
 /**
  * wiki-reviewer.ts — Stadio 4: Il Revisore
  *
- * Quality assurance pass. Receives the index of all generated pages
- * and checks for remaining duplications, missing cross-references,
- * and structural issues.
+ * QA pass post-compilazione. Verifica:
+ *   1. Pagine vuote (0 fatti, 0 children) — anomalia rispetto all'Architetto
+ *   2. Duplicazione contenutistica cross-page (n-gram overlap)
+ *   3. Link bidirezionali mancanti
+ *   4. Concept_leaf con stesso fatto primary in 2+ pagine (sanity)
  *
- * Uses Gemini Pro (single call) for intelligent review.
+ * Le issue di severity "error" sono LOGGATE ma non bloccanti.
+ * L'utente può rispondere con `/dream rebuild` per forzare full rebuild.
+ *
+ * Niente più chiamate LLM: review puramente deterministica.
  */
 
+import * as fs from "fs";
+import * as path from "path";
 import type Database from "better-sqlite3";
 import type { PluginConfig } from "./config";
 import type { CompilationPlan } from "./wiki-planner";
-import { callLlmTask } from "./classifier";
 import { dbg } from "./debug";
 
 const dlog = dbg("wiki-reviewer");
@@ -34,14 +40,48 @@ export interface ReviewResult {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers — n-gram overlap detector for content duplication
+// ---------------------------------------------------------------------------
+
+/** Strip frontmatter and HTML/wikilink markup from a page body. */
+function stripPageBody(content: string): string {
+  // Remove YAML frontmatter
+  const fmMatch = content.match(/^---[\s\S]*?---\s*/);
+  let body = fmMatch ? content.slice(fmMatch[0].length) : content;
+  // Remove <wikiauth ...> tags but keep inner text
+  body = body.replace(/<wikiauth\s+[^>]*>/g, "").replace(/<\/wikiauth>/g, "");
+  // Remove [[wikilinks]] keeping the slug as plain word
+  body = body.replace(/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g, "$1");
+  // Lowercase + strip punctuation
+  return body.toLowerCase().replace(/[^\w\sàèéìòù]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Word-level n-grams for a body. */
+function nGrams(body: string, n: number): Set<string> {
+  const words = body.split(" ").filter(w => w.length > 2); // skip stopword-ish short words
+  const grams = new Set<string>();
+  for (let i = 0; i + n <= words.length; i++) {
+    grams.add(words.slice(i, i + n).join(" "));
+  }
+  return grams;
+}
+
+/** Jaccard similarity of two n-gram sets. */
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersect = 0;
+  for (const g of a) if (b.has(g)) intersect++;
+  const union = a.size + b.size - intersect;
+  return union > 0 ? intersect / union : 0;
+}
+
+// ---------------------------------------------------------------------------
 // Il Revisore
 // ---------------------------------------------------------------------------
 
 /**
- * Reviews the compiled wiki for structural issues.
- * 
- * @param plan - The compilation plan used to generate the wiki
- * @returns ReviewResult with any issues found
+ * Reviews the compiled wiki for structural and content issues.
+ * Operates on the on-disk .md files + plan metadata.
  */
 export async function reviewWiki(
   api: any,
@@ -50,79 +90,127 @@ export async function reviewWiki(
   plan: CompilationPlan,
   logger: any
 ): Promise<ReviewResult> {
-  const PRO_MODEL = "gemini-3.1-pro-preview";
+  const issues: ReviewIssue[] = [];
 
-  // Build page index for the reviewer
-  const pageRows = plan.compilationOrder.map(slug => {
-    const p = plan.pages[slug];
-    if (!p) return null;
-    const primaryCount = p.primaryFacts.length;
-    const referencedCount = p.referencedFacts.length;
-    const links = (plan.linkGraph[slug] || []).join(", ");
-    return `| ${slug} | ${p.pageType} | ${p.description || p.title} | ${primaryCount} | ${referencedCount} | ${links} |`;
-  }).filter(Boolean).join("\n");
-
-  const prompt = `You are the Quality Reviewer of a personal wiki that was just generated.
-Verify the structure and report any issues.
-
-WIKI INDEX:
-| Page | Type | Description | Primary facts | Referenced facts | Links |
-|------|------|-------------|--------------|-----------------|-------|
-${pageRows}
-
-MERGED PAGES (merges performed):
-${plan.mergedPages.length > 0 ? plan.mergedPages.map(m => `- "${m.from}" → merged into "${m.into}" (${m.reason})`).join("\n") : "No merges performed."}
-
-CHECKS:
-1. Are there pages with 0 primary facts AND 0 referenced facts? (empty pages)
-2. Are there pages that should have bidirectional links but don't?
-3. Are there person pages without links to other person pages in the same family?
-4. Is there a concept that appears as primary in 3+ pages? (residual duplication)
-5. Is the total fact count (${plan.factCount}) consistent with the distribution?
-
-Respond with a JSON:
-{
-  "ok": true/false,
-  "issues": [
-    { "severity": "warning", "page": "slug", "message": "problem description", "suggestion": "suggested fix" }
-  ],
-  "summary": "1-2 sentence summary of wiki quality"
-}
-
-If there are no issues, respond with ok: true and empty issues.`;
-
-  try {
-    logger.info(`[Revisore] Reviewing wiki structure (${plan.compilationOrder.length} pages)...`);
-    const response = await callLlmTask(api, prompt, "revisore", 120000, PRO_MODEL, "low");
-
-    let parsed: ReviewResult;
-    try {
-      let cleaned = response.trim();
-      if (cleaned.startsWith("```json")) {
-        cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-      } else if (cleaned.startsWith("```")) {
-        cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
-      }
-      parsed = JSON.parse(cleaned);
-    } catch (err) {
-      logger.error(`[Revisore] JSON parse failed: ${err}`);
-      return { ok: true, issues: [], summary: "Review parse failed, assuming ok" };
+  // ---- Check 1: empty pages ----
+  for (const [slug, page] of Object.entries(plan.pages)) {
+    const isHub =
+      (page.pageType === "concept_hub" || page.pageType === "group_theme") &&
+      page.primaryFacts.length === 0;
+    if (isHub && page.childLeaves.length === 0) {
+      issues.push({
+        severity: "error",
+        page: slug,
+        message: `Hub "${slug}" non ha né fatti né child leaves.`,
+        suggestion: "Architect dovrebbe aver eliminato questa pagina. Verifica.",
+      });
     }
-
-    // Log results
-    if (parsed.issues && parsed.issues.length > 0) {
-      for (const issue of parsed.issues) {
-        const logFn = issue.severity === "error" ? logger.error : issue.severity === "warning" ? logger.warn : logger.info;
-        logFn(`[Revisore] [${issue.severity}] ${issue.page}: ${issue.message}`);
-        if (issue.suggestion) dlog(`  → ${issue.suggestion}`);
-      }
+    if (page.pageType === "concept_leaf" && page.primaryFacts.length === 0) {
+      issues.push({
+        severity: "error",
+        page: slug,
+        message: `Concept leaf "${slug}" senza fatti — dovrebbe essere stato rimosso.`,
+        suggestion: "Verifica garbage collection nell'Architect.",
+      });
     }
-
-    logger.info(`[Revisore] Review complete: ${parsed.ok ? "✅ OK" : "⚠️ Issues found"} — ${parsed.summary}`);
-    return parsed;
-
-  } catch (err) {
-    logger.error(`[Revisore] Review failed: ${err}`);
-    return { ok: true, issues: [], summary: `Review failed: ${err}` };
   }
+
+  // ---- Check 2: same fact assigned to 2+ pages (sanity) ----
+  const factHomes = new Map<string, string[]>(); // fact_id → pages[]
+  for (const [slug, page] of Object.entries(plan.pages)) {
+    for (const f of page.primaryFacts) {
+      if (!factHomes.has(f.id)) factHomes.set(f.id, []);
+      factHomes.get(f.id)!.push(slug);
+    }
+  }
+  for (const [factId, pages] of factHomes) {
+    if (pages.length > 1) {
+      issues.push({
+        severity: "error",
+        page: pages.join(","),
+        message: `Fact ${factId} è primary in ${pages.length} pagine: ${pages.join(", ")}.`,
+        suggestion: "Bug nell'Architetto: ogni fatto deve avere UNA sola pagina home.",
+      });
+    }
+  }
+
+  // ---- Check 3: bidirectional link consistency ----
+  for (const [slug, links] of Object.entries(plan.linkGraph)) {
+    for (const target of links) {
+      const reverse = plan.linkGraph[target] || [];
+      if (!reverse.includes(slug)) {
+        issues.push({
+          severity: "warning",
+          page: slug,
+          message: `Link non bidirezionale: ${slug} → ${target} ma non ritorno.`,
+        });
+      }
+    }
+  }
+
+  // ---- Check 4: content duplication (n-gram overlap on .md bodies) ----
+  // Read all generated pages and compute pairwise jaccard on 6-grams.
+  // Threshold 0.20 = circa 1 paragrafo replicato letteralmente è già rosso flag.
+  const pagesDir = path.join(config.wikiPath, "pages");
+  if (fs.existsSync(pagesDir)) {
+    const files = fs.readdirSync(pagesDir).filter(f => f.endsWith(".md"));
+    const bodies: { slug: string; grams: Set<string> }[] = [];
+    for (const f of files) {
+      const slug = f.replace(/\.md$/, "");
+      // Skip hub pages from duplicate detection: they intentionally reference children
+      const page = plan.pages[slug];
+      if (!page) continue;
+      const isHubPage =
+        page.primaryFacts.length === 0 &&
+        (page.pageType === "concept_hub" || page.pageType === "group_theme");
+      if (isHubPage) continue;
+      try {
+        const raw = fs.readFileSync(path.join(pagesDir, f), "utf-8");
+        const body = stripPageBody(raw);
+        if (body.length < 100) continue; // skip empty/very short
+        bodies.push({ slug, grams: nGrams(body, 6) });
+      } catch (e) {
+        dlog(`Read failed for ${f}: ${e}`);
+      }
+    }
+
+    // Pairwise comparison
+    for (let i = 0; i < bodies.length; i++) {
+      for (let j = i + 1; j < bodies.length; j++) {
+        const sim = jaccard(bodies[i].grams, bodies[j].grams);
+        if (sim > 0.20) {
+          issues.push({
+            severity: "error",
+            page: `${bodies[i].slug}↔${bodies[j].slug}`,
+            message: `Duplicazione contenutistica rilevata (jaccard 6-gram = ${sim.toFixed(3)}) tra "${bodies[i].slug}" e "${bodies[j].slug}".`,
+            suggestion: "Il Cronista ha probabilmente parafrasato fatti di un'altra pagina. /dream rebuild per riprovare.",
+          });
+        } else if (sim > 0.12) {
+          issues.push({
+            severity: "warning",
+            page: `${bodies[i].slug}↔${bodies[j].slug}`,
+            message: `Possibile sovrapposizione contenutistica (jaccard 6-gram = ${sim.toFixed(3)}) tra "${bodies[i].slug}" e "${bodies[j].slug}".`,
+          });
+        }
+      }
+    }
+  }
+
+  // ---- Logging ----
+  for (const issue of issues) {
+    const fn = issue.severity === "error" ? logger.error : issue.severity === "warning" ? logger.warn : logger.info;
+    fn.call(logger, `[Revisore] [${issue.severity}] ${issue.page}: ${issue.message}`);
+    if (issue.suggestion) dlog(`  → ${issue.suggestion}`);
+  }
+
+  const errorCount = issues.filter(i => i.severity === "error").length;
+  const warningCount = issues.filter(i => i.severity === "warning").length;
+  const ok = errorCount === 0;
+  const summary = ok
+    ? `OK — ${plan.compilationOrder.length} pagine, ${warningCount} warning, 0 errori.`
+    : `${errorCount} errori, ${warningCount} warning su ${plan.compilationOrder.length} pagine.`;
+
+  logger.info(`[Revisore] Review complete: ${ok ? "✅ OK" : "⚠️ Issues"} — ${summary}`);
+
+  return { ok, issues, summary };
 }

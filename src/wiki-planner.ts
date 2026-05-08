@@ -1,14 +1,19 @@
 /**
- * wiki-planner.ts — La Forgia della Wiki (Stadi 0-2)
+ * wiki-planner.ts — La Forgia della Wiki 2.0 (Stadi 0 / 0.5 / 1 / 1.5 / 2)
  *
- * Implements the first three stages of the Wiki Forge pipeline:
+ * Pipeline:
+ *   0.   IL FONDITORE      — leaf canonical USERS.md (persone + gruppi-as-hub)
+ *   0.5. TOPOLOGY SEED     — carica concept-registry persistente
+ *   1.   IL CARTOGRAFO     — un fatto → una pagina (NO referenced_pages)
+ *   1.5. IL CONCILIATORE   — merge semantico dei new_pages contro registry
+ *   2.   L'ARCHITETTO      — gerarchia hub→leaf, dirty propagation per link
  *
- *   0. IL FONDITORE  — Scaffolds foundation pages from USERS.md (deterministic, zero LLM)
- *   1. IL CARTOGRAFO — Classifies all facts into pages using Gemini Flash (1 call)
- *   2. L'ARCHITETTO  — Validates, optimizes, and builds the compilation plan (deterministic)
- *
- * The output is a CompilationPlan that the Cronista (wiki-compiler.ts) uses
- * to write each page with full cross-page awareness.
+ * Principi:
+ *   - Un fatto vive in UNA pagina sola (la sua "casa").
+ *   - Hub tematici NON contengono fatti, solo overview narrativa + wikilinks.
+ *   - Concept-registry persistente impedisce duplicati semantici tra REM.
+ *   - Dirty propagation: una pagina nuova marca dirty l'hub padre + le pagine
+ *     che dovrebbero linkarla.
  */
 
 import type Database from "better-sqlite3";
@@ -36,19 +41,32 @@ export interface FactForPage {
   senderId: string;
 }
 
+/**
+ * @deprecated Conserved for retrocompatibility with wiki-reviewer / topic-index.
+ * Always empty in the new pipeline (un fatto = una pagina).
+ */
 export interface FactRef {
   id: string;
   text: string;
   primaryPage: string;
 }
 
+export type PageType = "person" | "group_theme" | "concept_hub" | "concept_leaf";
+
 export interface PagePlan {
   slug: string;
   title: string;
   description: string;
-  pageType: "person" | "group_theme" | "concept";
+  pageType: PageType;
+  /** Per group_theme: scope string for prompt context */
   ownerScope?: string;
+  /** Per concept_leaf / person: slug del concept_hub o group_theme parent */
+  parentHub?: string;
+  /** Per concept_hub / group_theme: slug dei leaf figli (computati dall'Architetto) */
+  childLeaves: string[];
+  /** Fatti che hanno questa pagina come "casa" (one-fact-one-page). */
   primaryFacts: FactForPage[];
+  /** Sempre vuoto nella nuova pipeline — preservato per retrocompat. */
   referencedFacts: FactRef[];
   outgoingLinks: string[];
   incomingLinks: string[];
@@ -62,8 +80,52 @@ export interface CompilationPlan {
   groupScopes: Record<string, string[]>;
   generatedAt: string;
   factCount: number;
-  /** Pages whose fact set changed since the last plan — only these need recompilation */
+  /** Pages whose fingerprint changed since the last plan — only these need recompilation */
   dirtyPages: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Concept Registry (persistente tra REM)
+// ---------------------------------------------------------------------------
+
+export interface ConceptRegistryEntry {
+  slug: string;
+  title: string;
+  description: string;
+  pageType: "concept_hub" | "concept_leaf";
+  parentHub?: string;
+  aliases: string[];
+  createdAt: string;
+}
+
+export interface ConceptRegistry {
+  version: number;
+  entries: Record<string, ConceptRegistryEntry>;
+  generatedAt: string;
+}
+
+const REGISTRY_VERSION = 1;
+
+function loadConceptRegistry(config: PluginConfig, logger: any): ConceptRegistry {
+  const regPath = path.join(config.wikiPath, "_meta", "concept-registry.json");
+  try {
+    if (!fs.existsSync(regPath)) {
+      return { version: REGISTRY_VERSION, entries: {}, generatedAt: new Date().toISOString() };
+    }
+    const raw = fs.readFileSync(regPath, "utf-8");
+    const reg = JSON.parse(raw) as ConceptRegistry;
+    if (!reg.entries) reg.entries = {};
+    return reg;
+  } catch (e) {
+    logger.warn(`[Topology Seed] Could not load concept registry: ${e}`);
+    return { version: REGISTRY_VERSION, entries: {}, generatedAt: new Date().toISOString() };
+  }
+}
+
+function saveConceptRegistry(config: PluginConfig, registry: ConceptRegistry): void {
+  const regPath = path.join(config.wikiPath, "_meta", "concept-registry.json");
+  fs.mkdirSync(path.dirname(regPath), { recursive: true });
+  fs.writeFileSync(regPath, JSON.stringify(registry, null, 2), "utf-8");
 }
 
 // ---------------------------------------------------------------------------
@@ -71,9 +133,10 @@ export interface CompilationPlan {
 // ---------------------------------------------------------------------------
 
 /**
- * Creates foundation pages from USERS.md.
- * Person pages for each user, group pages for each group.
- * These are immutable anchors — the Cartographer cannot remove them.
+ * Crea le pagine di fondazione da USERS.md:
+ *   - person leaf per ogni utente registrato
+ *   - group_theme (hub-like) per ogni gruppo, con scope come metadati
+ * Le persone hanno parentHub = primo gruppo del loro `groups:` field.
  */
 function buildFoundationPages(
   db: Database.Database,
@@ -83,65 +146,9 @@ function buildFoundationPages(
   const groupScopes: Record<string, string[]> = {};
 
   const registry = getCachedRegistry();
-
-  // --- Person pages from DB users table ---
-  const users = db.prepare("SELECT names, sender_id FROM users").all() as Array<{
-    names: string;
-    sender_id: string;
-  }>;
-
-  // Load user details from registry for relazioni, born, groups
   const registryUsers = registry?.users ?? [];
-  const registryGroups = registry?.groups ?? [];
 
-  for (const u of users) {
-    const names = JSON.parse(u.names) as string[];
-    if (names.length === 0) continue;
-    const canonical = names[0];
-    const slug = canonical.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-
-    // Enrich from registry
-    const regUser = registryUsers.find(ru => ru.slug === slug || ru.sender_id === u.sender_id);
-
-    pages[slug] = {
-      slug,
-      title: canonical.charAt(0).toUpperCase() + canonical.slice(1),
-      description: "",
-      pageType: "person",
-      primaryFacts: [],
-      referencedFacts: [],
-      outgoingLinks: [],
-      incomingLinks: [],
-    };
-
-    // Add structural info as synthetic facts (from USERS.md, not the DB)
-    if (regUser) {
-      // Relations generate outgoing links
-      if (regUser.relazioni) {
-        // Extract linked user slugs from relazioni text
-        for (const otherUser of registryUsers) {
-          if (otherUser.slug !== slug) {
-            const otherNames = [otherUser.slug, ...otherUser.aliases].map(n => n.toLowerCase());
-            const relLower = regUser.relazioni.toLowerCase();
-            if (otherNames.some(n => relLower.includes(n))) {
-              if (!pages[slug].outgoingLinks.includes(otherUser.slug)) {
-                pages[slug].outgoingLinks.push(otherUser.slug);
-              }
-            }
-          }
-        }
-      }
-      // Groups generate outgoing links to group pages
-      for (const g of regUser.groups) {
-        const groupSlug = g.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-        if (!pages[slug].outgoingLinks.includes(groupSlug)) {
-          pages[slug].outgoingLinks.push(groupSlug);
-        }
-      }
-    }
-  }
-
-  // --- Group pages ---
+  // --- Group pages (act as hubs for their members + scope facts) ---
   const dbGroups = db.prepare("SELECT id, name, description, scope FROM user_groups").all() as Array<{
     id: string;
     name: string;
@@ -153,140 +160,245 @@ function buildFoundationPages(
     const slug = g.id.toLowerCase().replace(/[^a-z0-9]+/g, "_");
     let scopeArr: string[] = [];
     if (g.scope) {
-      try { scopeArr = JSON.parse(g.scope) as string[]; } catch {}
+      try {
+        scopeArr = JSON.parse(g.scope) as string[];
+      } catch {}
     }
     groupScopes[slug] = scopeArr;
-
-    // Find members of this group
-    const members = db.prepare(
-      "SELECT sender_id FROM group_members WHERE group_id = ?"
-    ).all(g.id) as Array<{ sender_id: string }>;
-    const memberSlugs = members.map(m => m.sender_id.toLowerCase().replace(/[^a-z0-9]+/g, "_"));
 
     pages[slug] = {
       slug,
       title: g.name || g.id.charAt(0).toUpperCase() + g.id.slice(1),
-      description: g.description || "",
+      description: g.description || `Gruppo ${g.name}`,
       pageType: "group_theme",
       ownerScope: scopeArr.length > 0 ? scopeArr.join("; ") : undefined,
+      childLeaves: [],
       primaryFacts: [],
       referencedFacts: [],
-      outgoingLinks: memberSlugs.filter(m => m !== slug),
+      outgoingLinks: [],
       incomingLinks: [],
     };
   }
 
-  logger.info(`[Fonditore] Created ${Object.keys(pages).length} foundation pages (${users.length} persons, ${dbGroups.length} groups)`);
+  // --- Person pages (always leaf, parentHub = first group) ---
+  const users = db.prepare("SELECT names, sender_id FROM users").all() as Array<{
+    names: string;
+    sender_id: string;
+  }>;
+
+  for (const u of users) {
+    const names = JSON.parse(u.names) as string[];
+    if (names.length === 0) continue;
+    const canonical = names[0];
+    const slug = canonical.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+
+    const regUser = registryUsers.find(ru => ru.slug === slug || ru.sender_id === u.sender_id);
+
+    let parentHub: string | undefined;
+    const outgoingLinks: string[] = [];
+
+    if (regUser) {
+      // First group = primary parent hub
+      if (regUser.groups.length > 0) {
+        const groupSlug = regUser.groups[0].toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        if (pages[groupSlug]) {
+          parentHub = groupSlug;
+        }
+      }
+
+      // Other groups → outgoing links
+      for (const g of regUser.groups) {
+        const gSlug = g.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        if (pages[gSlug] && !outgoingLinks.includes(gSlug)) {
+          outgoingLinks.push(gSlug);
+        }
+      }
+
+      // Relations → outgoing links to other person pages
+      if (regUser.relazioni) {
+        const relLower = regUser.relazioni.toLowerCase();
+        for (const otherUser of registryUsers) {
+          if (otherUser.slug === slug) continue;
+          const otherNames = [otherUser.slug, ...otherUser.aliases].map(n => n.toLowerCase());
+          if (otherNames.some(n => relLower.includes(n))) {
+            if (!outgoingLinks.includes(otherUser.slug)) {
+              outgoingLinks.push(otherUser.slug);
+            }
+          }
+        }
+      }
+    }
+
+    pages[slug] = {
+      slug,
+      title: canonical.charAt(0).toUpperCase() + canonical.slice(1),
+      description: `Pagina personale di ${canonical}`,
+      pageType: "person",
+      parentHub,
+      childLeaves: [],
+      primaryFacts: [],
+      referencedFacts: [],
+      outgoingLinks,
+      incomingLinks: [],
+    };
+  }
+
+  logger.info(
+    `[Fonditore] Created ${Object.keys(pages).length} foundation pages (${users.length} persons, ${dbGroups.length} groups)`
+  );
   return { pages, groupScopes };
 }
 
 // ---------------------------------------------------------------------------
-// Stadio 1: Il Cartografo (Gemini Flash, 1 call)
+// Stadio 1: Il Cartografo (Gemini Flash, batch)
 // ---------------------------------------------------------------------------
 
+interface CartographerAssignment {
+  fact_id: string;
+  page_slug: string;
+}
+
+interface CartographerNewPage {
+  slug: string;
+  title: string;
+  description: string;
+  page_type: "concept_hub" | "concept_leaf";
+  parent_hub?: string;
+}
+
+interface CartographerBlueprint {
+  assignments: CartographerAssignment[];
+  new_pages: CartographerNewPage[];
+}
+
 /**
- * Classifies ALL active facts into pages using a single Gemini Flash call.
- * Returns a blueprint mapping fact IDs to primary/secondary pages.
+ * Classifica i fatti in pagine. Ogni fatto ha UN solo `page_slug` (la sua casa).
+ * Il Cartografo riceve sempre il concept-registry esistente come "EXISTING PAGES".
  */
 async function classifyFacts(
   api: any,
-  db: Database.Database,
-  config: PluginConfig,
-  allFacts: Fact[],
+  factsToClassify: Fact[],
   foundationPages: Record<string, PagePlan>,
-  groupScopes: Record<string, string[]>,
+  registry: ConceptRegistry,
   logger: any
 ): Promise<CartographerBlueprint> {
+  // Foundation pages descriptor
+  const foundationDesc = Object.values(foundationPages)
+    .map(p => {
+      if (p.pageType === "person") {
+        return `- [person] ${p.slug} — ${p.title} (parentHub: ${p.parentHub || "—"})`;
+      }
+      if (p.pageType === "group_theme") {
+        return `- [group_hub] ${p.slug} — ${p.title} | scope: ${p.ownerScope || "—"}`;
+      }
+      return `- [${p.pageType}] ${p.slug}`;
+    })
+    .join("\n");
 
-  // Build the foundation pages description for the prompt
-  const foundationDesc = Object.values(foundationPages).map(p => {
-    let line = `- [${p.pageType}] ${p.slug}`;
-    if (p.pageType === "person") {
-      line += ` — pagina persona`;
-    } else if (p.pageType === "group_theme") {
-      line += ` — scope: ${p.ownerScope || "nessuno"}`;
-    }
-    return line;
-  }).join("\n");
+  // Concept registry descriptor
+  const registryEntries = Object.values(registry.entries);
+  const registryDesc =
+    registryEntries.length > 0
+      ? registryEntries
+          .map(e => `- [${e.pageType}] ${e.slug} — ${e.title} | ${e.description}${e.parentHub ? ` (parentHub: ${e.parentHub})` : ""}`)
+          .join("\n")
+      : "(none yet — empty registry)";
 
-  // --- Batched classification to avoid MAX_TOKENS truncation ---
+  // Batched classification
   const BATCH_SIZE = 15;
   const batches: Fact[][] = [];
-  for (let i = 0; i < allFacts.length; i += BATCH_SIZE) {
-    batches.push(allFacts.slice(i, i + BATCH_SIZE));
+  for (let i = 0; i < factsToClassify.length; i += BATCH_SIZE) {
+    batches.push(factsToClassify.slice(i, i + BATCH_SIZE));
   }
 
-  logger.info(`[Cartografo] Splitting ${allFacts.length} facts into ${batches.length} batches of ~${BATCH_SIZE}`);
+  logger.info(
+    `[Cartografo] ${factsToClassify.length} facts, ${batches.length} batch da ~${BATCH_SIZE}, registry: ${registryEntries.length} concept pages note`
+  );
 
-  const mergedResult: CartographerBlueprint = {
-    assignments: [],
-    new_pages: [],
-    suggested_links: {},
-  };
-
-  // Track new pages across batches so later batches know about them
-  const knownPages = new Set(Object.keys(foundationPages));
+  const merged: CartographerBlueprint = { assignments: [], new_pages: [] };
+  // Track new pages proposed across batches
+  const knownSlugs = new Set([...Object.keys(foundationPages), ...Object.keys(registry.entries)]);
 
   for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
     const batch = batches[batchIdx];
 
-    const factLines = batch.map(f => {
-      const topics = jsonToTopics(f.topics).join(", ");
-      return `[id:${f.id}] "${f.text}" topics=[${topics}] owner_type=${f.owner_type} owner_id=${f.owner_id}`;
-    }).join("\n");
+    const factLines = batch
+      .map(f => {
+        const topics = jsonToTopics(f.topics).join(", ");
+        return `[id:${f.id}] "${f.text}" topics=[${topics}] owner_type=${f.owner_type} owner_id=${f.owner_id}`;
+      })
+      .join("\n");
 
-    // Include new pages from previous batches in the context
-    const prevNewPages = mergedResult.new_pages.length > 0
-      ? "\n\nPAGES CREATED BY PREVIOUS BATCHES (reuse these, do NOT recreate):\n" +
-        mergedResult.new_pages.map(p => `- [concept] ${p.slug} — ${p.description}`).join("\n")
-      : "";
+    const prevNewPages =
+      merged.new_pages.length > 0
+        ? "\n\nPAGES CREATED BY PREVIOUS BATCHES (reuse these, do NOT recreate):\n" +
+          merged.new_pages
+            .map(p => `- [${p.page_type}] ${p.slug} — ${p.description}${p.parent_hub ? ` (parentHub: ${p.parent_hub})` : ""}`)
+            .join("\n")
+        : "";
 
-    const prompt = `You are the Cartographer of a personal wiki. You must assign ${batch.length} facts to pages (batch ${batchIdx + 1}/${batches.length}).
+    const prompt = `You are the Cartographer of a personal wiki. Assign ${batch.length} facts to pages (batch ${batchIdx + 1}/${batches.length}).
 
-EXISTING PAGES (foundation, NOT deletable):
-${foundationDesc}${prevNewPages}
+═══════════════════════════════════════════════════════════
+FUNDAMENTAL RULE: ONE FACT, ONE PAGE
+═══════════════════════════════════════════════════════════
+Each fact has EXACTLY ONE "home" page. Pages may reference each other via [[wikilinks]] but MUST NOT duplicate fact content. Choose the most semantically pertinent page for each fact.
 
-ASSIGNMENT RULES:
-1. Fact with owner_type="user" (bio, preference, personal habit)
-   → primary_page = the PERSON's page (already exists)
-   → referenced_pages = max 1-2 related thematic pages
+═══════════════════════════════════════════════════════════
+WIKI TOPOLOGY (2 livelli adattivi)
+═══════════════════════════════════════════════════════════
+- "person"        → leaf canonical da USERS.md (frodo, galadriel, gollum...). Contiene fatti owner_type=user di quella persona, e fatti che semanticamente vivono lì (es. preferenze personali, identità).
+- "group_theme"   → hub-like canonical da USERS.md (famiglia, amici...). NON contiene fatti propri: agisce come hub di overview che linka i suoi child leaf. I fatti owner_type=group del suo scope vanno in concept_leaf separati sotto di esso.
+- "concept_hub"   → hub tematico (può essere proposto da te). NON contiene fatti, solo overview narrativa di leaf figli. Crealo solo se serve raggruppare ≥2 concept_leaf semanticamente correlati.
+- "concept_leaf"  → pagina di dettaglio tematica. Contiene fatti. Ha un parent_hub (concept_hub o group_theme).
 
-2. Fact with owner_type="group" (falls within the group's scope)
-   → primary_page = the most suitable THEMATIC page
-   → If no suitable thematic page exists, CREATE A NEW ONE (invent a slug in Italian, no spaces, use underscores)
-   → referenced_pages = pages of the PEOPLE involved
+═══════════════════════════════════════════════════════════
+EXISTING FOUNDATION PAGES (immutable, da USERS.md)
+═══════════════════════════════════════════════════════════
+${foundationDesc}
 
-3. Fact with owner_type="global" or no specific owner
-   → primary_page = the most suitable thematic page
-   → If the fact clearly concerns a person, use that person as primary
+═══════════════════════════════════════════════════════════
+EXISTING CONCEPT PAGES (concept-registry, NON ricreare slug duplicati semanticamente)
+═══════════════════════════════════════════════════════════
+${registryDesc}${prevNewPages}
 
-4. Each fact has EXACTLY 1 primary_page
-5. referenced_pages: max 1-2 pages where the fact is relevant but secondary
-6. Names of new pages must be in Italian, no spaces (use underscores)
+═══════════════════════════════════════════════════════════
+ASSIGNMENT RULES
+═══════════════════════════════════════════════════════════
+1. owner_type="user"  → page_slug = pagina persona (foundation), SE il fatto è bio/preferenza/identità personale.
+                        Altrimenti il fatto può andare su concept_leaf tematico (es. "il PC di Daniel" può andare su "tech_e_casa" se più pertinente).
+2. owner_type="group" → page_slug = concept_leaf tematico sotto il group_theme corrispondente. NON metterlo direttamente sul group_theme (sono hub).
+                        Se nessun concept_leaf adatto esiste, CREANE UNO NUOVO con parent_hub = il group_theme.
+3. owner_type="global" → page_slug = concept_leaf tematico, eventualmente sotto un concept_hub.
 
-FACTS TO CLASSIFY:
+REGOLE DURE:
+- NON creare un nuovo slug se esiste già nel registry o nelle foundation pages — riusalo.
+- NON creare nuovi concept_leaf se un concept_leaf esistente è semanticamente equivalente: assegna lì.
+- I nomi nuovi devono essere in italiano, snake_case, descrittivi (es. "salute_routine_galadriel", "lavoro_progetti_frodo", NON "salute" generico se ce ne sono già).
+- parent_hub di un concept_leaf deve essere un slug esistente (foundation group_theme, registry concept_hub) o un nuovo concept_hub che proponi nella stessa risposta.
+
+═══════════════════════════════════════════════════════════
+FACTS TO CLASSIFY
+═══════════════════════════════════════════════════════════
 ${factLines}
 
-Respond with a JSON with this EXACT structure:
+═══════════════════════════════════════════════════════════
+RESPONSE FORMAT (JSON, no markdown fence)
+═══════════════════════════════════════════════════════════
 {
   "assignments": [
-    { "fact_id": "id_here", "primary_page": "frodo", "referenced_pages": ["lavoro"] }
+    { "fact_id": "abc123", "page_slug": "frodo" },
+    { "fact_id": "def456", "page_slug": "salute_routine_gollum" }
   ],
   "new_pages": [
-    { "slug": "regole_casa", "title": "Regole della casa", "description": "Regole e abitudini domestiche della famiglia" }
-  ],
-  "suggested_links": {
-    "regole_casa": ["famiglia", "gollum"]
-  }
+    { "slug": "salute_routine_gollum", "title": "Routine medica di Daniel", "description": "Recupero post-operatorio e visite di controllo di Gollum", "page_type": "concept_leaf", "parent_hub": "famiglia" }
+  ]
 }`;
 
-    logger.info(`[Cartografo] Batch ${batchIdx + 1}/${batches.length}: classifying ${batch.length} facts (prompt: ${prompt.length} chars)...`);
-
     let parsed: CartographerBlueprint | null = null;
-    const maxBatchAttempts = 2;
-    for (let attempt = 1; attempt <= maxBatchAttempts; attempt++) {
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const response = await callLlmTask(api, prompt, "cartografo", 120000, "gemini-3-flash-preview", "minimal");
-
       try {
         let cleaned = response.trim();
         if (cleaned.startsWith("```json")) {
@@ -295,147 +407,262 @@ Respond with a JSON with this EXACT structure:
           cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
         }
         parsed = JSON.parse(cleaned);
-        break; // Success
+        break;
       } catch (err) {
-        logger.warn(`[Cartografo] Batch ${batchIdx + 1} attempt ${attempt}/${maxBatchAttempts} JSON parse failed: ${err}`);
-        if (attempt >= maxBatchAttempts) {
-          logger.error(`[Cartografo] Batch ${batchIdx + 1} failed after ${maxBatchAttempts} attempts. Raw response:\n${response.substring(0, 500)}`);
+        logger.warn(`[Cartografo] Batch ${batchIdx + 1} attempt ${attempt}/${maxAttempts} JSON parse failed: ${err}`);
+        if (attempt >= maxAttempts) {
+          logger.error(`[Cartografo] Raw response:\n${response.substring(0, 500)}`);
           throw err;
         }
         await new Promise(r => setTimeout(r, 3000));
       }
     }
-
     if (!parsed) throw new Error(`[Cartografo] Batch ${batchIdx + 1} returned null`);
 
-    // Merge assignments
-    if (parsed.assignments) {
-      mergedResult.assignments.push(...parsed.assignments);
-    }
+    if (parsed.assignments) merged.assignments.push(...parsed.assignments);
 
-    // Merge new pages (deduplicate by slug)
     if (parsed.new_pages) {
       for (const np of parsed.new_pages) {
-        if (!knownPages.has(np.slug)) {
-          knownPages.add(np.slug);
-          mergedResult.new_pages.push(np);
+        const slug = np.slug.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        if (!knownSlugs.has(slug)) {
+          knownSlugs.add(slug);
+          merged.new_pages.push({ ...np, slug });
         }
       }
     }
 
-    // Merge suggested links
-    if (parsed.suggested_links) {
-      for (const [slug, links] of Object.entries(parsed.suggested_links)) {
-        if (!mergedResult.suggested_links[slug]) {
-          mergedResult.suggested_links[slug] = links;
-        } else {
-          // Add new links, avoid duplicates
-          for (const l of links) {
-            if (!mergedResult.suggested_links[slug].includes(l)) {
-              mergedResult.suggested_links[slug].push(l);
-            }
-          }
-        }
-      }
-    }
-
-    logger.info(`[Cartografo] Batch ${batchIdx + 1} done: ${parsed.assignments?.length || 0} assignments, ${parsed.new_pages?.length || 0} new pages`);
+    logger.info(
+      `[Cartografo] Batch ${batchIdx + 1} done: ${parsed.assignments?.length || 0} assignments, ${parsed.new_pages?.length || 0} new_pages`
+    );
   }
 
-  logger.info(`[Cartografo] All batches complete: ${mergedResult.assignments.length} total assignments, ${mergedResult.new_pages.length} new pages`);
-  return mergedResult;
-}
-
-interface CartographerBlueprint {
-  assignments: Array<{
-    fact_id: string;
-    primary_page: string;
-    referenced_pages: string[];
-  }>;
-  new_pages: Array<{
-    slug: string;
-    title: string;
-    description: string;
-  }>;
-  suggested_links: Record<string, string[]>;
+  logger.info(
+    `[Cartografo] Totale: ${merged.assignments.length} assignments, ${merged.new_pages.length} new_pages proposte`
+  );
+  return merged;
 }
 
 // ---------------------------------------------------------------------------
-// Stadio 2: L'Architetto (deterministic, zero LLM)
+// Stadio 1.5: Il Conciliatore (Gemini Pro, 1 call)
 // ---------------------------------------------------------------------------
+
+interface ConciliatorResult {
+  redirects: Record<string, string>; // proposed_slug → existing_slug (merge)
+  accepted_new: CartographerNewPage[];
+}
 
 /**
- * Validates the Cartographer's blueprint and builds the final CompilationPlan.
- * - Validates coverage (every fact assigned, no orphans)
- * - Creates new pages suggested by Cartographer
- * - Resolves merges (pages with 0 primary facts get absorbed)
- * - Builds bidirectional link graph
- * - Determines compilation order (persons → groups → concepts)
+ * Verifica le new_pages proposte dal Cartografo contro il registry esistente.
+ * Se una new_page è semanticamente equivalente a una pagina esistente, propone un redirect.
+ * Si attiva SOLO se ci sono new_pages.
  */
+async function conciliateNewPages(
+  api: any,
+  newPages: CartographerNewPage[],
+  foundationPages: Record<string, PagePlan>,
+  registry: ConceptRegistry,
+  logger: any
+): Promise<ConciliatorResult> {
+  if (newPages.length === 0) {
+    return { redirects: {}, accepted_new: [] };
+  }
+
+  const existingDesc = [
+    ...Object.values(foundationPages).map(p => `- [${p.pageType}] ${p.slug} — ${p.title} | ${p.description}`),
+    ...Object.values(registry.entries).map(e => `- [${e.pageType}] ${e.slug} — ${e.title} | ${e.description}`),
+  ].join("\n");
+
+  const newPagesDesc = newPages
+    .map(p => `- [${p.page_type}] ${p.slug} — ${p.title} | ${p.description}${p.parent_hub ? ` (parentHub: ${p.parent_hub})` : ""}`)
+    .join("\n");
+
+  const prompt = `You are the Conciliator. The Cartographer proposed new wiki pages. Verify they are NOT semantic duplicates of existing pages.
+
+═══════════════════════════════════════════════════════════
+EXISTING PAGES (foundation + registry)
+═══════════════════════════════════════════════════════════
+${existingDesc}
+
+═══════════════════════════════════════════════════════════
+PROPOSED NEW PAGES
+═══════════════════════════════════════════════════════════
+${newPagesDesc}
+
+═══════════════════════════════════════════════════════════
+TASK
+═══════════════════════════════════════════════════════════
+For each proposed new page:
+- If it is semantically equivalent (same topic, even with a different slug like "sport" vs "sport_e_tempo_libero", or "salute" vs "salute_e_benessere") to an EXISTING page → put it in "redirects" mapping the proposed slug to the existing slug.
+- If it is genuinely a new topic → put it in "accepted_new" preserving slug, title, description, page_type, parent_hub.
+
+REGOLE:
+- Slug "sport" e "sport_e_tempo_libero" sono semanticamente lo stesso topic → SEMPRE redirect.
+- Slug "salute" e "salute_e_benessere" stesso topic → SEMPRE redirect.
+- Slug specifici come "salute_routine_gollum" vs "salute_emergenze_galadriel" sono DIVERSI (diversa persona, diverso aspetto).
+- In caso di dubbio favorisci il redirect (consolidamento) — meglio meno pagine ben popolate che molte sparse.
+
+═══════════════════════════════════════════════════════════
+RESPONSE FORMAT (JSON, no markdown fence)
+═══════════════════════════════════════════════════════════
+{
+  "redirects": {
+    "sport_e_tempo_libero": "sport"
+  },
+  "accepted_new": [
+    { "slug": "salute_routine_gollum", "title": "...", "description": "...", "page_type": "concept_leaf", "parent_hub": "famiglia" }
+  ]
+}`;
+
+  logger.info(`[Conciliatore] Checking ${newPages.length} proposed new pages against ${Object.keys(registry.entries).length + Object.keys(foundationPages).length} existing...`);
+
+  let parsed: ConciliatorResult | null = null;
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await callLlmTask(api, prompt, "conciliatore", 120000, "gemini-3.1-pro-preview", "low");
+      let cleaned = response.trim();
+      if (cleaned.startsWith("```json")) {
+        cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+      } else if (cleaned.startsWith("```")) {
+        cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      }
+      parsed = JSON.parse(cleaned);
+      break;
+    } catch (err) {
+      logger.warn(`[Conciliatore] Attempt ${attempt}/${maxAttempts} failed: ${err}`);
+      if (attempt >= maxAttempts) {
+        logger.error(`[Conciliatore] Falling back: accepting all new_pages without merge`);
+        return { redirects: {}, accepted_new: newPages };
+      }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+
+  if (!parsed) {
+    return { redirects: {}, accepted_new: newPages };
+  }
+
+  // Sanity: ensure accepted_new is an array
+  if (!Array.isArray(parsed.accepted_new)) parsed.accepted_new = [];
+  if (!parsed.redirects || typeof parsed.redirects !== "object") parsed.redirects = {};
+
+  logger.info(
+    `[Conciliatore] ${Object.keys(parsed.redirects).length} redirects, ${parsed.accepted_new.length} new accepted`
+  );
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// Stadio 2: L'Architetto (deterministic)
+// ---------------------------------------------------------------------------
+
 function buildCompilationPlan(
   allFacts: Fact[],
   foundationPages: Record<string, PagePlan>,
   blueprint: CartographerBlueprint,
+  conciliation: ConciliatorResult,
+  registry: ConceptRegistry,
   groupScopes: Record<string, string[]>,
   logger: any
-): CompilationPlan {
-  // Start with foundation pages
+): { plan: CompilationPlan; updatedRegistry: ConceptRegistry } {
   const pages: Record<string, PagePlan> = {};
-  for (const [slug, page] of Object.entries(foundationPages)) {
-    pages[slug] = { ...page, primaryFacts: [], referencedFacts: [] };
+  for (const [slug, p] of Object.entries(foundationPages)) {
+    pages[slug] = { ...p, primaryFacts: [], referencedFacts: [], childLeaves: [] };
   }
 
-  // Create new pages from Cartographer suggestions
-  for (const np of (blueprint.new_pages || [])) {
+  // Materialize concept pages from registry (preserved across REM)
+  for (const [slug, entry] of Object.entries(registry.entries)) {
+    if (pages[slug]) continue; // foundation overrides
+    pages[slug] = {
+      slug,
+      title: entry.title,
+      description: entry.description,
+      pageType: entry.pageType,
+      parentHub: entry.parentHub,
+      childLeaves: [],
+      primaryFacts: [],
+      referencedFacts: [],
+      outgoingLinks: [],
+      incomingLinks: [],
+    };
+  }
+
+  // Materialize new accepted concept pages from this run
+  const updatedRegistry: ConceptRegistry = {
+    version: REGISTRY_VERSION,
+    entries: { ...registry.entries },
+    generatedAt: new Date().toISOString(),
+  };
+  for (const np of conciliation.accepted_new) {
     const slug = np.slug.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-    if (!pages[slug]) {
-      pages[slug] = {
-        slug,
-        title: np.title,
-        description: np.description,
-        pageType: "concept",
-        primaryFacts: [],
-        referencedFacts: [],
-        outgoingLinks: [],
-        incomingLinks: [],
-      };
-      dlog(`Architect: created new concept page "${slug}"`);
-    }
+    if (pages[slug]) continue; // already exists
+    pages[slug] = {
+      slug,
+      title: np.title,
+      description: np.description,
+      pageType: np.page_type,
+      parentHub: np.parent_hub,
+      childLeaves: [],
+      primaryFacts: [],
+      referencedFacts: [],
+      outgoingLinks: [],
+      incomingLinks: [],
+    };
+    updatedRegistry.entries[slug] = {
+      slug,
+      title: np.title,
+      description: np.description,
+      pageType: np.page_type,
+      parentHub: np.parent_hub,
+      aliases: [],
+      createdAt: new Date().toISOString(),
+    };
+    dlog(`Architect: created new ${np.page_type} "${slug}" parent=${np.parent_hub || "—"}`);
   }
 
-  // Build a quick fact lookup
+  // Build fact lookup
   const factMap = new Map<string, Fact>();
   for (const f of allFacts) factMap.set(f.id, f);
 
-  // Assign facts to pages
+  // Apply assignments — un fatto, una pagina (tenendo conto dei redirect)
   const assignedFactIds = new Set<string>();
-
-  for (const assignment of (blueprint.assignments || [])) {
-    const fact = factMap.get(assignment.fact_id);
+  for (const a of blueprint.assignments) {
+    const fact = factMap.get(a.fact_id);
     if (!fact) {
-      dlog(`Architect: fact ${assignment.fact_id} not found in DB, skipping`);
+      dlog(`Architect: fact ${a.fact_id} not in DB (likely superseded), skip`);
       continue;
     }
+    let slug = a.page_slug.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    // Apply redirects
+    if (conciliation.redirects[slug]) {
+      slug = conciliation.redirects[slug];
+    }
 
-    const primarySlug = assignment.primary_page.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-
-    // Ensure primary page exists (create if Cartographer invented one not in new_pages)
-    if (!pages[primarySlug]) {
-      pages[primarySlug] = {
-        slug: primarySlug,
-        title: primarySlug.charAt(0).toUpperCase() + primarySlug.slice(1).replace(/_/g, " "),
+    if (!pages[slug]) {
+      // Fallback: create on-the-fly as concept_leaf
+      logger.warn(`[Architetto] page "${slug}" not materialized, creating fallback concept_leaf`);
+      pages[slug] = {
+        slug,
+        title: slug.charAt(0).toUpperCase() + slug.slice(1).replace(/_/g, " "),
         description: "",
-        pageType: "concept",
+        pageType: "concept_leaf",
+        childLeaves: [],
         primaryFacts: [],
         referencedFacts: [],
         outgoingLinks: [],
         incomingLinks: [],
       };
-      dlog(`Architect: auto-created page "${primarySlug}" from assignment`);
+      updatedRegistry.entries[slug] = {
+        slug,
+        title: pages[slug].title,
+        description: "",
+        pageType: "concept_leaf",
+        aliases: [],
+        createdAt: new Date().toISOString(),
+      };
     }
 
-    // Add as primary fact
-    pages[primarySlug].primaryFacts.push({
+    pages[slug].primaryFacts.push({
       id: fact.id,
       text: fact.text,
       factType: fact.fact_type,
@@ -444,28 +671,14 @@ function buildCompilationPlan(
       senderId: fact.sender_id,
     });
     assignedFactIds.add(fact.id);
-
-    // Add referenced copies
-    for (const refPage of (assignment.referenced_pages || [])) {
-      const refSlug = refPage.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-      if (refSlug === primarySlug) continue;
-      if (!pages[refSlug]) continue; // Only reference existing pages
-
-      pages[refSlug].referencedFacts.push({
-        id: fact.id,
-        text: fact.text,
-        primaryPage: primarySlug,
-      });
-    }
   }
 
-  // Validation: check for orphan facts
+  // Orphan facts (no assignment) → fallback to owner page
   const orphans = allFacts.filter(f => !assignedFactIds.has(f.id));
   if (orphans.length > 0) {
-    logger.warn(`[Architetto] ${orphans.length} orphan facts not assigned by Cartographer, assigning to owners`);
+    logger.warn(`[Architetto] ${orphans.length} orphan facts, fallback to owner page`);
     for (const f of orphans) {
-      // Fallback: assign to owner page if it exists
-      const ownerSlug = f.owner_id?.toLowerCase().replace(/[^a-z0-9]+/g, "_") || "";
+      const ownerSlug = (f.owner_id || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
       const targetSlug = pages[ownerSlug] ? ownerSlug : Object.keys(pages)[0];
       if (pages[targetSlug]) {
         pages[targetSlug].primaryFacts.push({
@@ -480,63 +693,66 @@ function buildCompilationPlan(
     }
   }
 
-  // Merge resolution: concept pages with 0 primary facts get absorbed
+  // Compute parent-child relationships
+  // group_theme and concept_hub act as hubs; person and concept_leaf can have parentHub
   const mergedPages: { from: string; into: string; reason: string }[] = [];
   const pagesToRemove: string[] = [];
 
   for (const [slug, page] of Object.entries(pages)) {
-    if (page.pageType !== "concept") continue; // Never merge foundation pages
-    if (page.primaryFacts.length === 0 && page.referencedFacts.length > 0) {
-      // Find the best merge target from referenced facts
-      const targetSlugs = page.referencedFacts.map(r => r.primaryPage);
-      const targetSlug = targetSlugs[0]; // Most common reference
-      if (targetSlug && pages[targetSlug]) {
-        // Move referenced facts to target
-        for (const ref of page.referencedFacts) {
-          if (!pages[targetSlug].referencedFacts.some(r => r.id === ref.id)) {
-            pages[targetSlug].referencedFacts.push(ref);
-          }
-        }
-        mergedPages.push({ from: slug, into: targetSlug, reason: "zero primary facts" });
-        pagesToRemove.push(slug);
-        dlog(`Architect: merging empty page "${slug}" into "${targetSlug}"`);
+    if (page.parentHub && pages[page.parentHub]) {
+      const parent = pages[page.parentHub];
+      if (!parent.childLeaves.includes(slug)) {
+        parent.childLeaves.push(slug);
       }
+    }
+  }
+
+  // Garbage collection: concept_leaf with 0 facts and no children → mark for removal
+  // concept_hub with 0 children → also remove (empty hub)
+  for (const [slug, page] of Object.entries(pages)) {
+    if (page.pageType === "person" || page.pageType === "group_theme") continue; // foundation pages stay
+
+    if (page.pageType === "concept_leaf" && page.primaryFacts.length === 0) {
+      pagesToRemove.push(slug);
+      mergedPages.push({ from: slug, into: page.parentHub || "—", reason: "concept_leaf con 0 fatti" });
+      dlog(`Architect: removing empty concept_leaf "${slug}"`);
+    } else if (page.pageType === "concept_hub" && page.childLeaves.length === 0) {
+      pagesToRemove.push(slug);
+      mergedPages.push({ from: slug, into: "—", reason: "concept_hub senza children" });
+      dlog(`Architect: removing empty concept_hub "${slug}"`);
     }
   }
 
   for (const slug of pagesToRemove) {
+    // Remove from parent's childLeaves
+    const page = pages[slug];
+    if (page?.parentHub && pages[page.parentHub]) {
+      pages[page.parentHub].childLeaves = pages[page.parentHub].childLeaves.filter(s => s !== slug);
+    }
     delete pages[slug];
+    delete updatedRegistry.entries[slug];
   }
 
-  // Build bidirectional link graph
+  // Build link graph
   const linkGraph: Record<string, string[]> = {};
 
-  // Start with Cartographer's suggestions
-  for (const [slug, links] of Object.entries(blueprint.suggested_links || {})) {
-    const normalizedSlug = slug.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-    if (!pages[normalizedSlug]) continue;
-    linkGraph[normalizedSlug] = links
-      .map(l => l.toLowerCase().replace(/[^a-z0-9]+/g, "_"))
-      .filter(l => pages[l] && l !== normalizedSlug);
-  }
-
-  // Add links from referenced facts
+  // Hub → child leaves (outgoing)
   for (const [slug, page] of Object.entries(pages)) {
     if (!linkGraph[slug]) linkGraph[slug] = [];
-    for (const ref of page.referencedFacts) {
-      if (!linkGraph[slug].includes(ref.primaryPage) && ref.primaryPage !== slug) {
-        linkGraph[slug].push(ref.primaryPage);
+    for (const child of page.childLeaves) {
+      if (pages[child] && !linkGraph[slug].includes(child)) {
+        linkGraph[slug].push(child);
       }
     }
-    // Add foundation outgoing links
+    // Foundation outgoing links (relations between persons, group memberships)
     for (const link of page.outgoingLinks) {
-      if (!linkGraph[slug].includes(link) && pages[link]) {
+      if (pages[link] && !linkGraph[slug].includes(link) && link !== slug) {
         linkGraph[slug].push(link);
       }
     }
   }
 
-  // Make links bidirectional
+  // Make symmetric (bidirectional)
   for (const [slug, links] of Object.entries(linkGraph)) {
     for (const target of links) {
       if (!linkGraph[target]) linkGraph[target] = [];
@@ -546,7 +762,7 @@ function buildCompilationPlan(
     }
   }
 
-  // Update pages with computed links
+  // Sync onto pages
   for (const [slug, page] of Object.entries(pages)) {
     page.outgoingLinks = linkGraph[slug] || [];
     page.incomingLinks = Object.entries(linkGraph)
@@ -554,11 +770,11 @@ function buildCompilationPlan(
       .map(([source]) => source);
   }
 
-  // Compilation order: persons first, then groups, then concepts
+  // Compilation order: hubs first (group_theme + concept_hub), then leaves
   const compilationOrder = Object.values(pages)
     .sort((a, b) => {
-      const order = { person: 0, group_theme: 1, concept: 2 };
-      return (order[a.pageType] || 2) - (order[b.pageType] || 2);
+      const order = { group_theme: 0, concept_hub: 1, person: 2, concept_leaf: 3 };
+      return (order[a.pageType] ?? 4) - (order[b.pageType] ?? 4);
     })
     .map(p => p.slug);
 
@@ -570,28 +786,25 @@ function buildCompilationPlan(
     groupScopes,
     generatedAt: new Date().toISOString(),
     factCount: allFacts.length,
-    dirtyPages: compilationOrder, // default: all dirty (full rebuild)
+    dirtyPages: compilationOrder, // overridden by computeDirtyPages caller
   };
 
-  logger.info(`[Architetto] Plan: ${compilationOrder.length} pages (${mergedPages.length} merged), ${allFacts.length} facts, order: ${compilationOrder.join(" → ")}`);
-  return plan;
+  logger.info(
+    `[Architetto] Plan: ${compilationOrder.length} pages (${mergedPages.length} removed), order: ${compilationOrder.join(" → ")}`
+  );
+  return { plan, updatedRegistry };
 }
 
 // ---------------------------------------------------------------------------
 // Incremental helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Loads the previous compilation plan from disk.
- * Returns null if not found or corrupted.
- */
 function loadPreviousPlan(config: PluginConfig, logger: any): CompilationPlan | null {
   const planPath = path.join(config.wikiPath, "_meta", "compilation-plan.json");
   try {
     if (!fs.existsSync(planPath)) return null;
     const raw = fs.readFileSync(planPath, "utf-8");
     const plan = JSON.parse(raw) as CompilationPlan;
-    // Basic sanity check
     if (!plan.pages || !plan.compilationOrder) return null;
     return plan;
   } catch (e) {
@@ -600,10 +813,6 @@ function loadPreviousPlan(config: PluginConfig, logger: any): CompilationPlan | 
   }
 }
 
-/**
- * Computes which fact IDs were assigned in a compilation plan.
- * Returns a Map of fact_id → primary page slug.
- */
 function extractAssignedFactIds(plan: CompilationPlan): Map<string, string> {
   const map = new Map<string, string>();
   for (const [slug, page] of Object.entries(plan.pages)) {
@@ -615,57 +824,40 @@ function extractAssignedFactIds(plan: CompilationPlan): Map<string, string> {
 }
 
 /**
- * Computes the set of pages affected by a set of fact changes.
- * A page is dirty if it gained or lost primary or referenced facts.
+ * Fingerprint che include fatti + outgoing links + parentHub + childLeaves.
+ * Garantisce che pagine la cui "topologia" cambia (anche senza nuovi fatti)
+ * vengano marcate dirty. Risolve il problema della propagazione link.
  */
-function computeDirtyPages(
-  prevPlan: CompilationPlan,
-  newPlan: CompilationPlan
-): string[] {
+function pageFingerprint(p: PagePlan): string {
+  const factIds = p.primaryFacts.map(f => f.id).sort().join(",");
+  const out = [...p.outgoingLinks].sort().join(",");
+  const children = [...p.childLeaves].sort().join(",");
+  return `${factIds}|${out}|${p.parentHub || ""}|${children}`;
+}
+
+function computeDirtyPages(prev: CompilationPlan, next: CompilationPlan): string[] {
   const dirty = new Set<string>();
+  const prevFP = new Map<string, string>();
+  for (const [s, p] of Object.entries(prev.pages)) prevFP.set(s, pageFingerprint(p));
+  const nextFP = new Map<string, string>();
+  for (const [s, p] of Object.entries(next.pages)) nextFP.set(s, pageFingerprint(p));
 
-  // Compute fact fingerprints per page for both plans
-  const fingerprint = (plan: CompilationPlan): Map<string, string> => {
-    const map = new Map<string, string>();
-    for (const [slug, page] of Object.entries(plan.pages)) {
-      const primaryIds = page.primaryFacts.map(f => f.id).sort().join(",");
-      const refIds = page.referencedFacts.map(f => f.id).sort().join(",");
-      map.set(slug, `${primaryIds}|${refIds}`);
-    }
-    return map;
-  };
-
-  const prevFP = fingerprint(prevPlan);
-  const newFP = fingerprint(newPlan);
-
-  // Pages in new plan that are new or changed
-  for (const [slug, fp] of newFP) {
-    if (!prevFP.has(slug) || prevFP.get(slug) !== fp) {
-      dirty.add(slug);
-    }
+  for (const [s, fp] of nextFP) {
+    if (!prevFP.has(s) || prevFP.get(s) !== fp) dirty.add(s);
   }
-
-  // Pages that were removed (existed before but not now) — mark for cleanup later if needed
-  for (const slug of prevFP.keys()) {
-    if (!newFP.has(slug)) {
-      dirty.add(slug);
-    }
+  for (const s of prevFP.keys()) {
+    if (!nextFP.has(s)) dirty.add(s); // removed pages need cleanup
   }
-
   return Array.from(dirty);
 }
 
 // ---------------------------------------------------------------------------
-// Public API: orchestrate Stadi 0-2
+// Public API
 // ---------------------------------------------------------------------------
 
 /**
- * Runs Stages 0-2 of the Wiki Forge pipeline:
- * Fonditore → Cartografo → Architetto → CompilationPlan
- *
- * INCREMENTAL MODE: If a previous compilation plan exists, only new facts
- * are sent to the Cartografo. If nothing changed, the previous plan is
- * reused entirely (zero LLM calls).
+ * Esegue la pipeline Stadi 0 → 0.5 → 1 → 1.5 → 2.
+ * Modalità incrementale: classifica solo i fatti nuovi, riusa registry e plan.
  */
 export async function buildWikiPlan(
   api: any,
@@ -673,145 +865,109 @@ export async function buildWikiPlan(
   config: PluginConfig,
   logger: any
 ): Promise<CompilationPlan> {
-  // Load all active facts
-  const allFacts = db.prepare(
-    `SELECT * FROM facts WHERE is_active = 1 ORDER BY fact_type, updated_at DESC`
-  ).all() as Fact[];
+  const allFacts = db
+    .prepare(`SELECT * FROM facts WHERE is_active = 1 ORDER BY fact_type, updated_at DESC`)
+    .all() as Fact[];
 
   if (allFacts.length === 0) {
-    logger.warn("[Wiki Planner] No active facts found, creating skeleton-only plan");
+    logger.warn("[Wiki Planner] No active facts, skeleton-only plan");
   }
 
-  // Stadio 0: Il Fonditore (always runs — $0)
+  // Stadio 0: Fonditore
   logger.info("[Wiki Planner] === Stadio 0: Il Fonditore ===");
   const { pages: foundationPages, groupScopes } = buildFoundationPages(db, logger);
 
-  // --- Incremental delta computation ---
+  // Stadio 0.5: Topology Seed (load registry)
+  logger.info("[Wiki Planner] === Stadio 0.5: Topology Seed ===");
+  const registry = loadConceptRegistry(config, logger);
+  logger.info(`[Topology Seed] Loaded ${Object.keys(registry.entries).length} concept pages from registry`);
+
+  // Incremental: classify only new facts
   const prevPlan = loadPreviousPlan(config, logger);
   const currentFactIds = new Set(allFacts.map(f => f.id));
 
-  let blueprint: CartographerBlueprint = { assignments: [], new_pages: [], suggested_links: {} };
+  let blueprint: CartographerBlueprint = { assignments: [], new_pages: [] };
 
   if (prevPlan && allFacts.length > 0) {
-    // Compute delta: which facts are new, which are gone
     const prevAssigned = extractAssignedFactIds(prevPlan);
     const newFacts = allFacts.filter(f => !prevAssigned.has(f.id));
     const removedFactIds = Array.from(prevAssigned.keys()).filter(id => !currentFactIds.has(id));
 
     if (newFacts.length === 0 && removedFactIds.length === 0) {
-      // FAST PATH: nothing changed, reuse previous plan entirely
-      logger.info(`[Wiki Planner] === Stadio 1: Il Cartografo (SKIPPED — 0 new, 0 removed facts) ===`);
-      logger.info(`[Wiki Planner] === Stadio 2: L'Architetto (SKIPPED — reusing previous plan) ===`);
-
-      // Refresh the timestamp and mark no pages dirty
-      const reusedPlan: CompilationPlan = {
-        ...prevPlan,
-        generatedAt: new Date().toISOString(),
-        dirtyPages: [],
-      };
-
-      // Persist (refreshed timestamp)
+      logger.info(`[Wiki Planner] === Stadio 1+ (SKIPPED — 0 new, 0 removed) ===`);
+      const reused: CompilationPlan = { ...prevPlan, generatedAt: new Date().toISOString(), dirtyPages: [] };
       const planPath = path.join(config.wikiPath, "_meta", "compilation-plan.json");
       fs.mkdirSync(path.dirname(planPath), { recursive: true });
-      fs.writeFileSync(planPath, JSON.stringify(reusedPlan, null, 2), "utf-8");
-      dlog(`Plan reused (no changes), saved to ${planPath}`);
-
-      return reusedPlan;
+      fs.writeFileSync(planPath, JSON.stringify(reused, null, 2), "utf-8");
+      return reused;
     }
 
-    // INCREMENTAL PATH: classify only new facts, reuse old assignments
-    logger.info(`[Wiki Planner] === Stadio 1: Il Cartografo (INCREMENTAL — ${newFacts.length} new, ${removedFactIds.length} removed) ===`);
+    logger.info(`[Wiki Planner] === Stadio 1: Cartografo (INCREMENTAL — ${newFacts.length} new, ${removedFactIds.length} removed) ===`);
 
-    // Start with old assignments (pruned of removed facts)
+    // Carry over old assignments (filtering removed facts)
     for (const [slug, page] of Object.entries(prevPlan.pages)) {
-      // Carry over old assignments as blueprint assignments
       for (const f of page.primaryFacts) {
         if (currentFactIds.has(f.id)) {
-          blueprint.assignments.push({
-            fact_id: f.id,
-            primary_page: slug,
-            referenced_pages: [],
-          });
+          blueprint.assignments.push({ fact_id: f.id, page_slug: slug });
         }
       }
     }
-
-    // Carry over old referenced_pages info
-    for (const [slug, page] of Object.entries(prevPlan.pages)) {
-      for (const ref of page.referencedFacts) {
-        if (currentFactIds.has(ref.id)) {
-          const existing = blueprint.assignments.find(a => a.fact_id === ref.id);
-          if (existing && !existing.referenced_pages.includes(slug)) {
-            existing.referenced_pages.push(slug);
-          }
-        }
-      }
-    }
-
-    // Carry over old new_pages and suggested_links
-    for (const [slug, page] of Object.entries(prevPlan.pages)) {
-      if (page.pageType === "concept") {
-        blueprint.new_pages.push({
-          slug: page.slug,
-          title: page.title,
-          description: page.description,
-        });
-      }
-    }
-    blueprint.suggested_links = { ...(prevPlan.linkGraph || {}) };
 
     // Classify only new facts
     if (newFacts.length > 0) {
-      const newBlueprint = await classifyFacts(api, db, config, newFacts, foundationPages, groupScopes, logger);
-
-      // Merge new assignments
-      blueprint.assignments.push(...(newBlueprint.assignments || []));
-
-      // Merge new pages (deduplicate by slug)
-      const knownSlugs = new Set(blueprint.new_pages.map(p => p.slug));
-      for (const np of (newBlueprint.new_pages || [])) {
-        if (!knownSlugs.has(np.slug)) {
-          knownSlugs.add(np.slug);
-          blueprint.new_pages.push(np);
-        }
-      }
-
-      // Merge suggested links
-      for (const [slug, links] of Object.entries(newBlueprint.suggested_links || {})) {
-        if (!blueprint.suggested_links[slug]) {
-          blueprint.suggested_links[slug] = links;
-        } else {
-          for (const l of links) {
-            if (!blueprint.suggested_links[slug].includes(l)) {
-              blueprint.suggested_links[slug].push(l);
-            }
-          }
-        }
-      }
+      const newBlueprint = await classifyFacts(api, newFacts, foundationPages, registry, logger);
+      blueprint.assignments.push(...newBlueprint.assignments);
+      blueprint.new_pages.push(...newBlueprint.new_pages);
     }
   } else if (allFacts.length > 0) {
-    // FULL REBUILD: no previous plan exists
-    logger.info("[Wiki Planner] === Stadio 1: Il Cartografo (FULL — no previous plan) ===");
-    blueprint = await classifyFacts(api, db, config, allFacts, foundationPages, groupScopes, logger);
+    logger.info("[Wiki Planner] === Stadio 1: Cartografo (FULL — no previous plan) ===");
+    blueprint = await classifyFacts(api, allFacts, foundationPages, registry, logger);
+  }
+
+  // Stadio 1.5: Conciliatore — only if Cartographer proposed new_pages
+  let conciliation: ConciliatorResult = { redirects: {}, accepted_new: [] };
+  if (blueprint.new_pages.length > 0) {
+    logger.info(`[Wiki Planner] === Stadio 1.5: Conciliatore (${blueprint.new_pages.length} new pages to verify) ===`);
+    conciliation = await conciliateNewPages(api, blueprint.new_pages, foundationPages, registry, logger);
+
+    // Apply redirects to assignments
+    if (Object.keys(conciliation.redirects).length > 0) {
+      blueprint.assignments = blueprint.assignments.map(a => {
+        const slug = a.page_slug.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+        return conciliation.redirects[slug] ? { ...a, page_slug: conciliation.redirects[slug] } : a;
+      });
+    }
+  } else {
+    logger.info(`[Wiki Planner] === Stadio 1.5: Conciliatore (SKIPPED — no new pages) ===`);
   }
 
   // Stadio 2: L'Architetto
   logger.info("[Wiki Planner] === Stadio 2: L'Architetto ===");
-  const plan = buildCompilationPlan(allFacts, foundationPages, blueprint, groupScopes, logger);
+  const { plan, updatedRegistry } = buildCompilationPlan(
+    allFacts,
+    foundationPages,
+    blueprint,
+    conciliation,
+    registry,
+    groupScopes,
+    logger
+  );
 
-  // Compute dirty pages by comparing with previous plan
+  // Compute dirty pages
   if (prevPlan) {
     plan.dirtyPages = computeDirtyPages(prevPlan, plan);
-    logger.info(`[Wiki Planner] Dirty pages: ${plan.dirtyPages.length}/${plan.compilationOrder.length} (${plan.dirtyPages.join(", ") || "none"})`);
+    logger.info(
+      `[Wiki Planner] Dirty pages: ${plan.dirtyPages.length}/${plan.compilationOrder.length} (${plan.dirtyPages.join(", ") || "none"})`
+    );
   } else {
-    // No previous plan → all pages are dirty (full rebuild)
     plan.dirtyPages = [...plan.compilationOrder];
   }
 
-  // Persist plan for debugging and incremental updates
+  // Persist plan + updated registry
   const planPath = path.join(config.wikiPath, "_meta", "compilation-plan.json");
   fs.mkdirSync(path.dirname(planPath), { recursive: true });
   fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+  saveConceptRegistry(config, updatedRegistry);
   dlog(`Plan saved to ${planPath}`);
 
   return plan;
