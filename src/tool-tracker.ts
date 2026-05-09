@@ -93,8 +93,11 @@ export function syncToolExecutions(db: Database.Database, logger: any): number {
        last_byte_offset = excluded.last_byte_offset,
        updated_at = datetime('now')`
   );
+  // INSERT OR IGNORE sfrutta il UNIQUE INDEX uq_tool_exec_call_file (schema v5)
+  // come safety net: anche se il parser avesse bug e re-elaborasse lo stesso
+  // chunk, i duplicati con stesso (call_id, source_file) verrebbero ignorati.
   const insertExec = db.prepare(
-    `INSERT INTO tool_executions
+    `INSERT OR IGNORE INTO tool_executions
        (session_id, agent_name, call_id, tool_name, tool_args_json,
         result_summary, is_error, source_file, timestamp)
      VALUES (@session_id, @agent_name, @call_id, @tool_name, @tool_args_json,
@@ -156,24 +159,25 @@ export function syncToolExecutions(db: Database.Database, logger: any): number {
 
       const sessionId = sessionIdFromFile(filePath);
 
-      // Parsa linea per linea. Se l'ultima linea è troncata (file in scrittura),
-      // ne salviamo l'offset prima della troncatura per la prossima passata.
-      const text = buffer.toString("utf-8");
-      const lines = text.split("\n");
+      // Trova l'ultima newline nel chunk: tutto fino a lì è "linee complete"
+      // che possiamo processare con sicurezza. Eventuali bytes dopo l'ultima
+      // newline sono linee in scrittura (truncated) — li lasciamo per il run
+      // successivo. `consumed` = bytes fino al \n finale incluso.
+      const lastNewline = buffer.lastIndexOf(0x0A); // 0x0A = '\n'
+      if (lastNewline < 0) {
+        // Nessuna newline nel chunk: nessuna linea completa, salta senza
+        // aggiornare offset (riproveremo quando arriverà la newline).
+        continue;
+      }
+      const consumed = lastNewline + 1;
+      const completeChunk = buffer.subarray(0, consumed).toString("utf-8");
+      // .split("\n") su un chunk che finisce con "\n" produce un trailing ""
+      // che ignoreremo al loop.
+      const lines = completeChunk.split("\n");
 
-      let consumed = 0; // bytes consumati con successo
       const insertMany = db.transaction(() => {
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
-          // Ultima linea senza newline finale = potenziale troncatura → skip
-          // (la rileggeremo alla prossima passata quando il newline arriverà)
-          const isLast = i === lines.length - 1;
-          if (isLast && !text.endsWith("\n") && line.length > 0) {
-            // Non avanzare oltre questa linea
-            break;
-          }
-          consumed += Buffer.byteLength(line, "utf-8") + 1; // +1 per "\n"
-
           const trimmed = line.trim();
           if (!trimmed) continue;
 
@@ -200,7 +204,7 @@ export function syncToolExecutions(db: Database.Database, logger: any): number {
               if (argsJson.length > MAX_ARGS_LEN) {
                 argsJson = argsJson.substring(0, MAX_ARGS_LEN) + "…[truncated]";
               }
-              insertExec.run({
+              const info = insertExec.run({
                 session_id: sessionId,
                 agent_name: agentName,
                 call_id: part.id || null,
@@ -211,7 +215,8 @@ export function syncToolExecutions(db: Database.Database, logger: any): number {
                 source_file: filePath,
                 timestamp: entry.timestamp || new Date().toISOString(),
               });
-              totalInserted++;
+              // info.changes è 0 quando INSERT OR IGNORE dropa un duplicato
+              if (info.changes > 0) totalInserted++;
             }
           }
           // Tool result: message{role:toolResult, toolCallId, content}

@@ -93,7 +93,7 @@ export interface GroupMember {
 // SQL schema — current version
 // ---------------------------------------------------------------------------
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 /**
  * Table creation SQL for schema v1.
@@ -321,6 +321,22 @@ const SCHEMA_V4: string[] = [
   )`,
 ];
 
+const SCHEMA_V5: string[] = [
+  // -----------------------------------------------------------------------
+  // Defense-in-depth contro duplicati nella tabella tool_executions:
+  // UNIQUE su (call_id, source_file) blocca futuri INSERT duplicati anche
+  // in caso di bug del parser. INSERT OR IGNORE nel codice TS sfrutta
+  // questo vincolo silenziosamente.
+  //
+  // (Bug del 2026-05-09: il parser calcolava offset off-by-one, faceva
+  //  reset al run successivo, e re-elaborava lo stesso file generando
+  //  duplicati. Lo schema v5 mette un guard contro reincidenze.)
+  // -----------------------------------------------------------------------
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_tool_exec_call_file
+     ON tool_executions (call_id, source_file)
+     WHERE call_id IS NOT NULL`,
+];
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -428,7 +444,25 @@ function applySchema(db: Database.Database): void {
       db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(4);
     }
 
-    // v5, etc. — future migrations go here
+    // v5: add UNIQUE index on tool_executions(call_id, source_file) to
+    // prevent duplicate inserts even if the JSONL parser misbehaves.
+    if (currentVersion < 5) {
+      // Cleanup pre-existing duplicates from the v4 parser bug before adding
+      // the unique constraint (otherwise migration would fail).
+      db.exec(`
+        DELETE FROM tool_executions
+        WHERE id NOT IN (
+          SELECT MIN(id) FROM tool_executions
+          GROUP BY call_id, source_file
+        ) AND call_id IS NOT NULL
+      `);
+      for (const sql of SCHEMA_V5) {
+        db.exec(sql);
+      }
+      db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(5);
+    }
+
+    // v6, etc. — future migrations go here
   });
 
   migrate();
