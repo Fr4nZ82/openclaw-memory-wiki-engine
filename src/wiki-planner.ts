@@ -229,6 +229,31 @@ function buildFoundationPages(
       }
     }
 
+    // Synthetic facts dalla USERS.md: born e relazioni vengono iniettate come
+    // primaryFacts della pagina persona così il Cronista le scrive nella prosa.
+    // Il senderId="users-md" li distingue dai fatti del DB e bypassa l'ACL.
+    const syntheticFacts: FactForPage[] = [];
+    if (regUser?.born) {
+      syntheticFacts.push({
+        id: `synthetic_born_${slug}`,
+        text: `${canonical} è nato il ${regUser.born}.`,
+        factType: "bio",
+        ownerType: "user",
+        ownerId: slug,
+        senderId: "users-md",
+      });
+    }
+    if (regUser?.relazioni) {
+      syntheticFacts.push({
+        id: `synthetic_relazioni_${slug}`,
+        text: `Relazioni: ${regUser.relazioni}.`,
+        factType: "bio",
+        ownerType: "user",
+        ownerId: slug,
+        senderId: "users-md",
+      });
+    }
+
     pages[slug] = {
       slug,
       title: canonical.charAt(0).toUpperCase() + canonical.slice(1),
@@ -236,7 +261,7 @@ function buildFoundationPages(
       pageType: "person",
       parentHub,
       childLeaves: [],
-      primaryFacts: [],
+      primaryFacts: syntheticFacts,
       referencedFacts: [],
       outgoingLinks,
       incomingLinks: [],
@@ -567,7 +592,8 @@ function buildCompilationPlan(
 ): { plan: CompilationPlan; updatedRegistry: ConceptRegistry } {
   const pages: Record<string, PagePlan> = {};
   for (const [slug, p] of Object.entries(foundationPages)) {
-    pages[slug] = { ...p, primaryFacts: [], referencedFacts: [], childLeaves: [] };
+    // Preserva i synthetic facts (born, relazioni da USERS.md) iniettati dal Fonditore.
+    pages[slug] = { ...p, primaryFacts: [...p.primaryFacts], referencedFacts: [], childLeaves: [] };
   }
 
   // Materialize concept pages from registry (preserved across REM)
