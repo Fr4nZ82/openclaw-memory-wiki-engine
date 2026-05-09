@@ -31,17 +31,21 @@ interface JsonlEntry {
   id?: string;
   parentId?: string | null;
   timestamp?: string;
-  // tool_call
-  name?: string;
-  arguments?: any;
-  input?: any;
-  // tool_result
-  error?: any;
-  isError?: boolean;
-  content?: any;
-  output?: any;
-  // session
-  cwd?: string;
+  message?: {
+    role?: string;        // "user" | "assistant" | "toolResult"
+    content?: Array<{
+      type?: string;      // "toolCall" | "text" | "image" | ...
+      id?: string;        // callId per toolCall
+      name?: string;      // nome del tool per toolCall
+      arguments?: any;
+      input?: any;
+      text?: string;
+    }>;
+    toolCallId?: string;  // per role=toolResult
+    toolName?: string;    // per role=toolResult
+    isError?: boolean;    // per role=toolResult
+    details?: any;        // per role=toolResult
+  };
 }
 
 /**
@@ -180,38 +184,51 @@ export function syncToolExecutions(db: Database.Database, logger: any): number {
             continue;
           }
 
-          if (entry.type === "tool_call") {
-            const toolName = entry.name || "unknown";
-            const args = entry.arguments ?? entry.input ?? {};
-            let argsJson = "";
-            try {
-              argsJson = JSON.stringify(args);
-            } catch {
-              argsJson = String(args);
+          // Tool call: vivono come content parts dentro message{role:assistant}
+          if (entry.type === "message" && entry.message?.role === "assistant") {
+            const parts = Array.isArray(entry.message.content) ? entry.message.content : [];
+            for (const part of parts) {
+              if (part?.type !== "toolCall") continue;
+              const toolName = part.name || "unknown";
+              const args = part.arguments ?? part.input ?? {};
+              let argsJson = "";
+              try {
+                argsJson = JSON.stringify(args);
+              } catch {
+                argsJson = String(args);
+              }
+              if (argsJson.length > MAX_ARGS_LEN) {
+                argsJson = argsJson.substring(0, MAX_ARGS_LEN) + "…[truncated]";
+              }
+              insertExec.run({
+                session_id: sessionId,
+                agent_name: agentName,
+                call_id: part.id || null,
+                tool_name: toolName,
+                tool_args_json: argsJson,
+                result_summary: null,
+                is_error: 0,
+                source_file: filePath,
+                timestamp: entry.timestamp || new Date().toISOString(),
+              });
+              totalInserted++;
             }
-            if (argsJson.length > MAX_ARGS_LEN) {
-              argsJson = argsJson.substring(0, MAX_ARGS_LEN) + "…[truncated]";
-            }
-
-            insertExec.run({
-              session_id: sessionId,
-              agent_name: agentName,
-              call_id: entry.id || null,
-              tool_name: toolName,
-              tool_args_json: argsJson,
-              result_summary: null,
-              is_error: 0,
-              source_file: filePath,
-              timestamp: entry.timestamp || new Date().toISOString(),
-            });
-            totalInserted++;
-          } else if (entry.type === "tool_result") {
-            // Correla per parentId (id del tool_call originario)
-            const callId = entry.parentId;
+          }
+          // Tool result: message{role:toolResult, toolCallId, content}
+          else if (entry.type === "message" && entry.message?.role === "toolResult") {
+            const callId = entry.message.toolCallId;
             if (!callId) continue;
 
-            const isError = !!(entry.error || entry.isError);
-            let resultText = extractText(entry.content ?? entry.output);
+            const isError = !!entry.message.isError;
+            let resultText = extractText(entry.message.content);
+            // Fallback su details se content è vuoto
+            if (!resultText && entry.message.details) {
+              try {
+                resultText = JSON.stringify(entry.message.details);
+              } catch {
+                resultText = String(entry.message.details);
+              }
+            }
             if (resultText.length > MAX_RESULT_LEN) {
               resultText = resultText.substring(0, MAX_RESULT_LEN) + "…[truncated]";
             }
