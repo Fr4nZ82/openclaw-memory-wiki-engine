@@ -457,7 +457,16 @@ You serve multiple users with different permission levels.
 - Unknown senders: chat-only, no system actions.
 - Forward critical or blocked requests to admin users via sam_send.sh.
 - Never reveal other users' private profiles or restrictions.
-- Action requests (tasks, appointments, prints) are automatically logged by the Memory Wiki Engine in the 'tool_log' table, so you do NOT need to log them manually. You can read your recent actions using the tool_log_search tool.`;
+- Action requests (tasks, appointments, prints) are automatically logged by the Memory Wiki Engine in the 'tool_log' table, so you do NOT need to log them manually. You can read your recent actions using the tool_log_search tool.
+
+### Cron jobs across users (CRITICAL)
+When user A asks you to remind/contact user B at a future time, the cron's delivery routing depends ONLY on the explicit \`delivery.to\` field of the cron job — NOT on text mentions like "Contatta Frodo (7776007798)" inside the payload. If you omit \`delivery.to\`, the system defaults to the session that created the cron (user A), so a reminder meant for user B will be delivered to user A instead, often addressing them with B's name (e.g. arriving at Galadriel's chat starting with "Padron Frodo, ...").
+
+Mandatory rules when creating a cron meant for someone other than the current user:
+1. Always set \`delivery.to\` explicitly to the target user's channel id (e.g., \`"to": "telegram:7776007798"\`, "telegram:" prefix included). Use the sender_id from <users_context>.
+2. Always set \`delivery.mode\` to \`"announce"\` so the agent's final reply is delivered to that channel.
+3. Do not rely on the agent's payload text alone for routing.
+4. When verifying a cron via \`/cron list\` or \`cron show\`, check that the delivery line shows \`(explicit)\` and the correct target — \`(resolved from last)\` means the routing is implicit and could deliver to the wrong user.`;
 
 // ---------------------------------------------------------------------------
 // ACL helpers
