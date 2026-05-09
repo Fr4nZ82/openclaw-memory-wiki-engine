@@ -93,7 +93,7 @@ export interface GroupMember {
 // SQL schema — current version
 // ---------------------------------------------------------------------------
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 /**
  * Table creation SQL for schema v1.
@@ -277,6 +277,50 @@ const SCHEMA_V3: string[] = [
   )`
 ];
 
+const SCHEMA_V4: string[] = [
+  // -----------------------------------------------------------------------
+  // Layer 6.b — Tool Executions (audit trail strutturato dei tool_call)
+  //
+  // Popolata da `tool-tracker.ts` parsando i JSONL di
+  // ~/.openclaw/agents/<name>/sessions/*.jsonl ogni 60s.
+  //
+  // Distinzione vs `tool_log`:
+  //   tool_log         → messaggio utente che ha innescato un task (ADR-022)
+  //   tool_executions  → tool_call effettivamente eseguiti da Sam con args+result
+  //
+  // `tool_log_search` ora fa UNION delle due per Sam.
+  // -----------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS tool_executions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    agent_name      TEXT NOT NULL DEFAULT 'main',
+    call_id         TEXT,
+    tool_name       TEXT NOT NULL,
+    tool_args_json  TEXT,
+    result_summary  TEXT,
+    is_error        INTEGER NOT NULL DEFAULT 0,
+    source_file     TEXT NOT NULL,
+    timestamp       TEXT NOT NULL
+  )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_tool_exec_session
+     ON tool_executions (session_id, id)`,
+
+  `CREATE INDEX IF NOT EXISTS idx_tool_exec_recent
+     ON tool_executions (timestamp DESC)`,
+
+  `CREATE INDEX IF NOT EXISTS idx_tool_exec_callid
+     ON tool_executions (call_id) WHERE call_id IS NOT NULL`,
+
+  // Stato del parser JSONL: dove abbiamo letto l'ultima volta in ogni file
+  // (byte offset = append-only safe).
+  `CREATE TABLE IF NOT EXISTS jsonl_parser_state (
+    source_file       TEXT PRIMARY KEY,
+    last_byte_offset  INTEGER NOT NULL DEFAULT 0,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+];
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -376,7 +420,15 @@ function applySchema(db: Database.Database): void {
       db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(3);
     }
 
-    // v4, etc. — future migrations go here
+    // v4: add tool_executions + jsonl_parser_state for the JSONL audit parser
+    if (currentVersion < 4) {
+      for (const sql of SCHEMA_V4) {
+        db.exec(sql);
+      }
+      db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(4);
+    }
+
+    // v5, etc. — future migrations go here
   });
 
   migrate();

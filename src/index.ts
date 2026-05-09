@@ -70,6 +70,7 @@ let db: Database.Database | null = null;
 let config: PluginConfig | null = null;
 let dreamTimer: ReturnType<typeof setInterval> | null = null;
 let remTimer: ReturnType<typeof setTimeout> | null = null;
+let toolTrackerTimer: ReturnType<typeof setInterval> | null = null;
 let usersSynced = false;
 let pluginApi: any = null;  // Cached api reference for USERS.md path resolution
 
@@ -910,15 +911,20 @@ function register(api: any): void {
       name: "tool_log_search",
       label: "Tool Log Search",
       description:
-        "Search the audit trail of external tools and physical actions you have performed. " +
-        "Use this tool when the user asks 'Cosa hai appena fatto?', 'Hai acceso le luci?', " +
-        "or asks about recent commands you executed.",
+        "Search your audit trail. Returns the most recent USER REQUESTS that triggered tasks " +
+        "AND your actual TOOL EXECUTIONS (commands, reads, cron jobs, etc.) in chronological order. " +
+        "Use this tool when the user asks 'Cosa hai appena fatto?', 'Hai stampato?', 'Hai acceso le luci?', " +
+        "or any question about your recent actions.",
       parameters: {
         type: "object",
         properties: {
           limit: {
             type: "number",
-            description: "Number of recent actions to retrieve (default: 5, max: 20)",
+            description: "Max recent entries to retrieve (default: 10, max: 30). Includes both requests and executions.",
+          },
+          all_sessions: {
+            type: "boolean",
+            description: "If true, search across all sessions (not just current). Default: false.",
           },
         },
       },
@@ -926,20 +932,79 @@ function register(api: any): void {
         const database = getDb();
         if (!database) return { content: [{ type: "text", text: "Memory not initialized" }] };
 
-        const limit = typeof params.limit === "number" ? Math.min(params.limit, 20) : 5;
+        const limit = typeof params.limit === "number" ? Math.min(params.limit, 30) : 10;
+        const allSessions = params.all_sessions === true;
         const senderId = lastResolvedSender !== "unknown" ? lastResolvedSender : "unknown";
         const sessionId = senderId !== "unknown" ? `telegram:${senderId}` : "unknown";
 
-        const logs = database.prepare(
-          `SELECT action_text, timestamp FROM tool_log WHERE session_id = ? ORDER BY id DESC LIMIT ?`
-        ).all(sessionId, limit) as Array<{ action_text: string; timestamp: string }>;
+        // UNION fra le due sorgenti, ordinate per timestamp (DESC).
+        //   tool_log         → richieste utente che hanno innescato task (ADR-022)
+        //   tool_executions  → tool_call effettivi popolati da tool-tracker
+        // Filtro session: per default solo sessione corrente; con all_sessions=true tutte.
+        const filterClause = allSessions ? "" : "WHERE session_id = @session_id";
+        const sessionFilter = allSessions ? "" : `WHERE session_id = @session_id OR session_id LIKE @session_pattern`;
 
-        if (logs.length === 0) {
-          return { content: [{ type: "text", text: "Nessuna azione registrata di recente in questa sessione." }] };
+        const sessionPattern = senderId !== "unknown" ? `%${senderId}%` : sessionId;
+
+        const rows = database.prepare(`
+          SELECT * FROM (
+            SELECT
+              'request'    AS kind,
+              timestamp    AS ts,
+              action_text  AS detail,
+              NULL         AS tool_name,
+              NULL         AS args,
+              NULL         AS result,
+              0            AS is_error
+            FROM tool_log
+            ${allSessions ? "" : "WHERE session_id = @session_id"}
+
+            UNION ALL
+
+            SELECT
+              'execution'      AS kind,
+              timestamp        AS ts,
+              NULL             AS detail,
+              tool_name,
+              tool_args_json   AS args,
+              result_summary   AS result,
+              is_error
+            FROM tool_executions
+            ${allSessions ? "" : sessionFilter}
+          )
+          ORDER BY ts DESC
+          LIMIT @limit
+        `).all({
+          session_id: sessionId,
+          session_pattern: sessionPattern,
+          limit,
+        }) as Array<{
+          kind: "request" | "execution";
+          ts: string;
+          detail: string | null;
+          tool_name: string | null;
+          args: string | null;
+          result: string | null;
+          is_error: number;
+        }>;
+
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: "Nessuna attività recente registrata." }] };
         }
 
-        const logsText = logs.map(l => `[${l.timestamp}] ${l.action_text}`).join("\n");
-        return { content: [{ type: "text", text: "Azioni recenti (più recenti prima):\n" + logsText }] };
+        const lines = rows.map(r => {
+          if (r.kind === "request") {
+            return `[${r.ts}] 📥 USER REQUEST: ${r.detail}`;
+          }
+          // execution
+          const args = (r.args || "").length > 120 ? r.args!.substring(0, 120) + "…" : (r.args || "{}");
+          const result = r.result ? ` → ${r.result.length > 80 ? r.result.substring(0, 80) + "…" : r.result}` : " (no result)";
+          const err = r.is_error ? " ⚠️" : "";
+          return `[${r.ts}] 🔧 TOOL ${r.tool_name}(${args})${result}${err}`;
+        });
+
+        const text = "Attività recenti (più recenti prima):\n" + lines.join("\n");
+        return { content: [{ type: "text", text }] };
       },
     });
 
@@ -1202,6 +1267,7 @@ function register(api: any): void {
         `[Memory Wiki Engine] Activated — DB: ${config.dbPath}, Wiki: ${config.wikiPath}`
       );
       scheduleDreams(api, config, database, ocLog);
+      scheduleToolTracker(database, ocLog);
     });
   }
 
@@ -1213,6 +1279,7 @@ function register(api: any): void {
     api.onShutdown(() => {
       if (dreamTimer) clearInterval(dreamTimer);
       if (remTimer) clearTimeout(remTimer);
+      if (toolTrackerTimer) clearInterval(toolTrackerTimer);
       if (db) {
         resetStatements();
         dbModule?.closeDatabase(db);
@@ -1220,6 +1287,36 @@ function register(api: any): void {
       }
     });
   }
+}
+
+/**
+ * Schedula il tool tracker: parsing dei JSONL agent ogni 60s per popolare
+ * `tool_executions`. Run anche subito allo startup per backfill iniziale.
+ */
+function scheduleToolTracker(database: Database.Database, log: any): void {
+  // Lazy import per evitare loading anticipato di moduli con fs
+  import("./tool-tracker").then(({ syncToolExecutions }) => {
+    // Backfill iniziale (asincrono, non blocca lo startup)
+    setImmediate(() => {
+      try {
+        syncToolExecutions(database, log);
+      } catch (e) {
+        log.warn(`[ToolTracker] initial sync failed: ${e}`);
+      }
+    });
+
+    toolTrackerTimer = setInterval(() => {
+      try {
+        syncToolExecutions(database, log);
+      } catch (e) {
+        log.warn(`[ToolTracker] sync failed: ${e}`);
+      }
+    }, 60 * 1000);
+    toolTrackerTimer.unref();
+    log.info(`[Memory Wiki Engine] Tool tracker scheduled — every 60s`);
+  }).catch(e => {
+    log.error(`[ToolTracker] failed to load module: ${e}`);
+  });
 }
 
 // ---------------------------------------------------------------------------
