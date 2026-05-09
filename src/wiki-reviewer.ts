@@ -98,11 +98,18 @@ export async function reviewWiki(
       (page.pageType === "concept_hub" || page.pageType === "group_theme") &&
       page.primaryFacts.length === 0;
     if (isHub && page.childLeaves.length === 0) {
+      // group_theme da USERS.md è una foundation page immutabile: vuota oggi
+      // ma legittimamente popolabile in futuro. Solo info, non error.
+      const isUsersFoundation = page.pageType === "group_theme";
       issues.push({
-        severity: "error",
+        severity: isUsersFoundation ? "info" : "error",
         page: slug,
-        message: `Hub "${slug}" non ha né fatti né child leaves.`,
-        suggestion: "Architect dovrebbe aver eliminato questa pagina. Verifica.",
+        message: isUsersFoundation
+          ? `Group hub "${slug}" (USERS.md) ancora senza fatti né children — verrà popolato quando arriveranno fatti.`
+          : `Hub "${slug}" non ha né fatti né child leaves.`,
+        suggestion: isUsersFoundation
+          ? undefined
+          : "Architect dovrebbe aver eliminato questa pagina. Verifica.",
       });
     }
     if (page.pageType === "concept_leaf" && page.primaryFacts.length === 0) {
