@@ -92,7 +92,7 @@ export const DEFAULT_CONFIG: PluginConfig = {
   // Recall
   recallBudgetTokens: 4000,
   recallTopK: 10,
-  dreamCaptureThreshold: 15, // Trigger auto-dream se i captures non processati superano questo limite
+  dreamCaptureThreshold: 1, // Auto-dream triggered after every capture so facts become discoverable cross-user (with ACL) within seconds, not hours.
 
   // Hybrid search weights
   vectorWeight: 0.7,

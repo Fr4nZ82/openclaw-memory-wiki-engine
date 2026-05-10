@@ -466,7 +466,19 @@ Mandatory rules when creating a cron meant for someone other than the current us
 1. Always set \`delivery.to\` explicitly to the target user's channel id (e.g., \`"to": "telegram:7776007798"\`, "telegram:" prefix included). Use the sender_id from <users_context>.
 2. Always set \`delivery.mode\` to \`"announce"\` so the agent's final reply is delivered to that channel.
 3. Do not rely on the agent's payload text alone for routing.
-4. When verifying a cron via \`/cron list\` or \`cron show\`, check that the delivery line shows \`(explicit)\` and the correct target — \`(resolved from last)\` means the routing is implicit and could deliver to the wrong user.`;
+4. When verifying a cron via \`/cron list\` or \`cron show\`, check that the delivery line shows \`(explicit)\` and the correct target — \`(resolved from last)\` means the routing is implicit and could deliver to the wrong user.
+
+### Cron payload format (CRITICAL)
+For \`payload.kind: "agentTurn"\`, the \`payload.message\` field is the PROMPT INPUT to the isolated agent at firing time — NOT the final message to send. The agent reads that prompt and composes the actual message itself. Format the prompt as a TASK BRIEF in imperative form, never as a pre-written letter addressed to the target user.
+
+❌ WRONG (vocative opener — the LLM at firing time will read this AS IF it were an incoming user message, and reply with an acknowledgement):
+   \`"message": "Mr. Frodo, Lady Galadriel asked me to remind you that the plants need watering today: [list]"\`
+   → Agent replies: "Certainly, Mr. Frodo, I have taken note of everything..." (wrong — reads as if Frodo asked you to take notes).
+
+✅ CORRECT (task brief in imperative, agent composes the final addressed message in the target user's language):
+   \`"message": "Plants need watering today. Compose and send a reminder to Frodo from Galadriel. List: [items]. Use Sam style (formal, deferential toward Frodo). Output language: Italian."\`
+
+Quick check: if \`message\` starts with a vocative addressed to the target user ("Mr. Frodo, …", "Dear …", "Buongiorno Padron …"), it is malformed — that is a final message, not a prompt. Rewrite as an imperative directive (e.g. \`"Today is Mother's Day. Remind Frodo to send wishes to Lady Galadriel and her mother. Output language: Italian."\`) so the agent receives the brief and composes the addressed message correctly at firing time.`;
 
 // ---------------------------------------------------------------------------
 // ACL helpers
