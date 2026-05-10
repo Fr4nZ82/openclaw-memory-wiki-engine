@@ -30,6 +30,8 @@
  */
 
 import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 import type Database from "better-sqlite3";
 import { resolveConfig, type PluginConfig } from "./config";
 import { topicsToJson } from "./utils";
@@ -132,6 +134,43 @@ function register(api: any): void {
   // Debug toggle: plugin config takes precedence over MWE_DEBUG env var
   if (typeof userConfig.debug === "boolean") {
     setDebugEnabled(userConfig.debug);
+  }
+
+  // ----------------------------------------------------------------
+  // Skills snapshot cache invalidation at boot.
+  //
+  // OpenClaw caches sessionEntry.skillsSnapshot in
+  // ~/.openclaw/agents/main/sessions/sessions.json. The built-in
+  // ensureSkillsWatcher only fires for sessions with a real workspaceDir;
+  // Telegram DM sessions have workspaceDir=undefined, so live skill
+  // changes never propagate. shouldRefreshSnapshotForVersion(0,0) also
+  // returns false, so a daemon restart by itself never invalidates the
+  // cache — stale skill names (e.g. removed lotr/silmarillion) survive
+  // for days until the user runs /new.
+  //
+  // Mitigation: strip skillsSnapshot from every entry at register()
+  // time. OpenClaw rebuilds from filesystem on first turn via the
+  // !currentSkillsSnapshot branch in agent-command.js.
+  // ----------------------------------------------------------------
+  try {
+    const sessionsPath = path.join(os.homedir(), ".openclaw", "agents", "main", "sessions", "sessions.json");
+    if (fs.existsSync(sessionsPath)) {
+      const raw = fs.readFileSync(sessionsPath, "utf8");
+      const sessions = JSON.parse(raw);
+      let cleared = 0;
+      for (const entry of Object.values(sessions) as any[]) {
+        if (entry && typeof entry === "object" && entry.skillsSnapshot) {
+          delete entry.skillsSnapshot;
+          cleared++;
+        }
+      }
+      if (cleared > 0) {
+        fs.writeFileSync(sessionsPath, JSON.stringify(sessions, null, 2));
+        dlog(`Cleared cached skillsSnapshot from ${cleared} session entries`);
+      }
+    }
+  } catch (e) {
+    dlog(`skillsSnapshot cache invalidation failed (non-fatal): ${e}`);
   }
 
   // NOTE: Database is NOT opened here — it's lazy-initialized on first access
